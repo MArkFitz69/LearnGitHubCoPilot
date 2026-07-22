@@ -40,3 +40,10 @@ Thumbs.db
 .actrc*
 
 __pycache__/
+
+# Zigbee sensor reader
+sensor_data.db
+sensor_data.db-wal
+sensor_data.db-shm
+zigbee_network.db
+exports/

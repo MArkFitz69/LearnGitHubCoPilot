@@ -1,2 +1,7 @@
 fastapi
 uvicorn
+
+# Zigbee sensor reader dependencies
+zigpy>=0.64.0
+bellows>=0.39.0
+openpyxl>=3.1.0
