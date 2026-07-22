@@ -20,7 +20,7 @@ from zigpy.zcl.clusters.measurement import (
 )
 from zigpy.zcl.clusters.general import PowerConfiguration
 
-from .config import DEVICE_PATH, SERIAL_BAUDRATE, SENSOR_NAMES
+from .config import DEVICE_PATH, SERIAL_BAUDRATE, FLOW_CONTROL, SENSOR_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -72,12 +72,13 @@ class ZigbeeSensorListener:
         self.app: ControllerApplication | None = None
 
     def _get_zigpy_config(self) -> dict:
-        """Build the zigpy configuration dict for bellows/EZSP."""
+        """Build the zigpy configuration dict for bellows/EZSP (ember adapter)."""
         return {
             zigpy_conf.CONF_DATABASE: "zigbee_network.db",
             zigpy_conf.CONF_DEVICE: {
                 zigpy_conf.CONF_DEVICE_PATH: DEVICE_PATH,
                 zigpy_conf.CONF_DEVICE_BAUDRATE: SERIAL_BAUDRATE,
+                "flow_control": "hardware" if FLOW_CONTROL else "software",
             },
         }
 

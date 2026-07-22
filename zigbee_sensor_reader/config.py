@@ -14,7 +14,7 @@ import os
 # Network connection for the Sonoff Zigbee Dongle-M (Ethernet)
 # The dongle exposes a TCP serial socket on the network
 ZIGBEE_HOST = os.environ.get("ZIGBEE_HOST", "192.168.1.59")
-ZIGBEE_PORT = int(os.environ.get("ZIGBEE_PORT", "8888"))
+ZIGBEE_PORT = int(os.environ.get("ZIGBEE_PORT", "6638"))
 
 # Connection string for zigpy/bellows (socket:// for network, COMx for USB)
 # Override with ZIGBEE_DEVICE_PATH env var for custom setups
@@ -23,6 +23,12 @@ DEVICE_PATH = os.environ.get(
     f"socket://{ZIGBEE_HOST}:{ZIGBEE_PORT}",
 )
 SERIAL_BAUDRATE = 115200
+
+# Radio adapter type: "ember" (EZSP) for the Dongle-M's EFR32 chip
+RADIO_TYPE = "ezsp"
+
+# Hardware flow control (RTS/CTS) — disabled for this dongle
+FLOW_CONTROL = False
 
 # Database configuration
 DATABASE_PATH = os.environ.get(

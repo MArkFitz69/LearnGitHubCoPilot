@@ -34,10 +34,10 @@ Make sure the Dongle-M is reachable on your network:
 ping 192.168.1.59
 ```
 
-The dongle exposes a TCP serial socket (typically port `8888`). You can test connectivity:
+The dongle exposes a TCP serial socket on port `6638` (EZSP/ember adapter). You can test connectivity:
 
 ```bash
-python -c "import socket; s=socket.socket(); s.settimeout(3); s.connect(('192.168.1.59', 8888)); print('Connected!'); s.close()"
+python -c "import socket; s=socket.socket(); s.settimeout(3); s.connect(('192.168.1.59', 6638)); print('Connected!'); s.close()"
 ```
 
 ### 3. Configure
@@ -48,11 +48,11 @@ Edit `zigbee_sensor_reader/config.py` or set environment variables:
 # Set the dongle IP (default: 192.168.1.59)
 set ZIGBEE_HOST=192.168.1.59
 
-# Set the TCP port (default: 8888)
-set ZIGBEE_PORT=8888
+# Set the TCP port (default: 6638)
+set ZIGBEE_PORT=6638
 
 # Or override the full device path directly
-set ZIGBEE_DEVICE_PATH=socket://192.168.1.59:8888
+set ZIGBEE_DEVICE_PATH=socket://192.168.1.59:6638
 
 # Set polling interval in seconds (default: 60)
 set ZIGBEE_POLL_INTERVAL=30
