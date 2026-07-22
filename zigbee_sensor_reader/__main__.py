@@ -97,6 +97,17 @@ async def run_collector(pair: bool = False) -> None:
             await asyncio.sleep(POLLING_INTERVAL)
             logger.debug("Heartbeat – still listening...")
 
+            # Read cached Zigbee sensor values and store them
+            try:
+                from .zigbee_reader import read_cached_sensors
+                cached = read_cached_sensors(listener.app)
+                for reading in cached:
+                    handle_reading(reading, conn)
+                if cached:
+                    logger.info("Stored %d Zigbee sensor readings (cached)", len(cached))
+            except Exception as e:
+                logger.debug("Zigbee cache read failed: %s", e)
+
             # Poll Hive if credentials are configured
             try:
                 from .hive_reader import poll_hive, HIVE_USERNAME

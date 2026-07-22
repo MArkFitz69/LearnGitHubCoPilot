@@ -93,8 +93,11 @@ class ZigbeeSensorListener:
         # auto_form=True creates a new Zigbee network on first run
         self.app = await BellowsApp.new(config, auto_form=True)
 
-        # Register our listener for device attribute reports
+        # Register application-level listener for join/leave events
         self.app.add_listener(self)
+
+        # Register cluster-level listeners on all known devices
+        self._register_cluster_listeners()
 
         logger.info(
             "Zigbee coordinator started on %s. Network channel: %s",
@@ -110,6 +113,42 @@ class ZigbeeSensorListener:
             friendly = SENSOR_NAMES.get(str(ieee), str(ieee))
             model = getattr(dev, "model", None)
             logger.info("Known device: %s (%s) model=%s", friendly, ieee, model)
+
+    def _register_cluster_listeners(self) -> None:
+        """Add listeners on every relevant cluster of every device."""
+        target_clusters = (
+            TemperatureMeasurement.cluster_id,
+            RelativeHumidity.cluster_id,
+            PowerConfiguration.cluster_id,
+        )
+        for ieee, device in self.app.devices.items():
+            for ep_id, endpoint in device.endpoints.items():
+                if ep_id == 0:
+                    continue  # skip ZDO
+                for cluster_id in target_clusters:
+                    if cluster_id in endpoint.in_clusters:
+                        cluster = endpoint.in_clusters[cluster_id]
+                        cluster.add_listener(_ClusterListener(self, cluster))
+                        logger.debug(
+                            "Registered listener on %s cluster 0x%04X",
+                            SENSOR_NAMES.get(str(ieee), str(ieee)),
+                            cluster_id,
+                        )
+
+
+class _ClusterListener:
+    """Lightweight listener attached to a single cluster, forwarding to the main handler."""
+
+    def __init__(self, parent: "ZigbeeSensorListener", cluster):
+        self.parent = parent
+        self.cluster = cluster
+
+    def attribute_updated(self, attrid, value, *args):
+        """Called by zigpy when this cluster receives an attribute report."""
+        self.parent._handle_attribute(self.cluster, attrid, value)
+
+    def cluster_command(self, *args, **kwargs):
+        pass
 
     async def stop(self) -> None:
         """Shut down the Zigbee coordinator cleanly."""
@@ -130,8 +169,8 @@ class ZigbeeSensorListener:
 
     # ── zigpy listener callbacks ──────────────────────────────────────
 
-    def attribute_updated(self, cluster, attrid, value) -> None:
-        """Called by zigpy when a device reports an attribute change."""
+    def _handle_attribute(self, cluster, attrid, value) -> None:
+        """Process an attribute report from a cluster listener."""
         device = cluster.endpoint.device
         ieee = str(device.ieee)
         friendly = SENSOR_NAMES.get(ieee, ieee)
@@ -143,17 +182,17 @@ class ZigbeeSensorListener:
             model=model,
         )
 
-        if isinstance(cluster, TemperatureMeasurement):
+        if cluster.cluster_id == TemperatureMeasurement.cluster_id:
             # ZCL temperature is in units of 0.01°C
             reading.temperature_c = value / 100.0
             logger.info("%s temperature: %.1f°C", friendly, reading.temperature_c)
 
-        elif isinstance(cluster, RelativeHumidity):
+        elif cluster.cluster_id == RelativeHumidity.cluster_id:
             # ZCL humidity is in units of 0.01%
             reading.humidity_pct = value / 100.0
             logger.info("%s humidity: %.1f%%", friendly, reading.humidity_pct)
 
-        elif isinstance(cluster, PowerConfiguration):
+        elif cluster.cluster_id == PowerConfiguration.cluster_id:
             # Battery percentage remaining
             # ZCL reports battery percentage as 0-200 (0.5% steps)
             reading.battery_pct = value / 2.0
@@ -239,5 +278,61 @@ async def poll_sensors(app: ControllerApplication) -> list[SensorReading]:
 
             if reading.temperature_c is not None or reading.humidity_pct is not None:
                 readings.append(reading)
+
+    return readings
+
+
+def read_cached_sensors(app: ControllerApplication) -> list[SensorReading]:
+    """
+    Read last-known values from the zigpy attribute cache.
+
+    This is instant (no network I/O) — reads whatever the sensors last
+    reported. Sensors update the cache every 10-20 minutes on their own.
+    """
+    readings = []
+
+    for ieee, device in app.devices.items():
+        ieee_str = str(ieee)
+        if ieee_str not in SENSOR_NAMES:
+            continue
+
+        friendly = SENSOR_NAMES[ieee_str]
+        model = getattr(device, "model", None)
+
+        for ep_id, endpoint in device.endpoints.items():
+            if ep_id == 0:
+                continue
+
+            temp = None
+            humidity = None
+            battery = None
+
+            if TemperatureMeasurement.cluster_id in endpoint.in_clusters:
+                cluster = endpoint.in_clusters[TemperatureMeasurement.cluster_id]
+                val = cluster.get(0x0000)  # measured_value
+                if val is not None:
+                    temp = val / 100.0
+
+            if RelativeHumidity.cluster_id in endpoint.in_clusters:
+                cluster = endpoint.in_clusters[RelativeHumidity.cluster_id]
+                val = cluster.get(0x0000)
+                if val is not None:
+                    humidity = val / 100.0
+
+            if PowerConfiguration.cluster_id in endpoint.in_clusters:
+                cluster = endpoint.in_clusters[PowerConfiguration.cluster_id]
+                val = cluster.get(0x0021)  # battery_percentage_remaining
+                if val is not None:
+                    battery = val / 2.0
+
+            if temp is not None or humidity is not None:
+                readings.append(SensorReading(
+                    ieee_address=ieee_str,
+                    friendly_name=friendly,
+                    model=model,
+                    temperature_c=temp,
+                    humidity_pct=humidity,
+                    battery_pct=battery,
+                ))
 
     return readings
