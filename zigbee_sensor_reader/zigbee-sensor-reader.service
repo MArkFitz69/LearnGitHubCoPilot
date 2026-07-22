@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/LearnGitHubCoPilot
-ExecStart=/usr/bin/python3 -m zigbee_sensor_reader
+User=admin
+WorkingDirectory=/home/admin/LearnGitHubCoPilot
+ExecStart=/home/admin/LearnGitHubCoPilot/.venv/bin/python -m zigbee_sensor_reader
 Restart=always
 RestartSec=10
 Environment=ZIGBEE_HOST=192.168.1.59
