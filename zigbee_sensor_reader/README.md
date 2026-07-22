@@ -1,78 +1,91 @@
 # Sonoff Zigbee Sensor Reader
 
-Python application to collect temperature and humidity data from **Sonoff SNZB-02** (and similar) Zigbee sensors via a **Sonoff Zigbee Dongle-M** connected over Ethernet.
+Python application to monitor home temperature and humidity for heating analysis. Collects data from multiple sources and stores it for Power BI visualization.
+
+## Data Sources
+
+| Source | Protocol | Data Collected |
+|--------|----------|----------------|
+| **Sonoff SNZB-02D/DR2** sensors | Zigbee via Dongle-M | Temperature, humidity, battery |
+| **Hive thermostats** | Cloud API | Temperature, target, heating on/off, boost, mode |
+| **Shelly Blu H&T** | Bluetooth (BLE) | Temperature, humidity, battery |
 
 ## Features
 
-- 🌡️ Reads temperature, humidity, and battery level from 10+ sensors
-- 🌐 Connects to Dongle-M over your local network (Ethernet/TCP socket)
-- 💾 Stores readings in a local SQLite database
-- 📊 Exports to **CSV** and **Excel** for Power BI / Excel analysis
-- 🔗 Auto-discovers new sensors when they join the network
-- 🏷️ Configurable friendly names per sensor (e.g. "Kitchen", "Bedroom")
+- 🌡️ Reads temperature, humidity, and battery from 10+ Zigbee sensors
+- 🔥 Captures Hive thermostat state: current temp, target, heating on/off, boost, mode
+- 📡 Captures Shelly Blu H&T outdoor sensor via Bluetooth
+- 🏠 Heating zone mapping (Zone 1/2/3) for each sensor and thermostat
+- 🌐 Web API server for remote data access from Power BI
+- 💾 SQLite database with automatic schema migrations
+- 📊 CSV and Excel export with per-sensor sheets
 
-## Hardware Required
+## Hardware
 
-| Item | Notes |
-|------|-------|
-| **Sonoff Zigbee Dongle-M** | Coordinator connected via Ethernet (EFR32MG21, EZSP protocol) |
-| **Sonoff SNZB-02 / SNZB-02D / SNZB-02P** | Temperature & humidity sensors |
+| Item | Role |
+|------|------|
+| **Raspberry Pi 3 B+** | 24/7 data collector (Bluetooth + network) |
+| **Sonoff Zigbee Dongle-M** | Zigbee coordinator (Ethernet at 192.168.1.59:6638) |
+| **Sonoff SNZB-02D / SNZB-02DR2** × 8 | Indoor temp/humidity sensors |
+| **Hive Thermostats** × 3 | Heating system control (cloud API) |
+| **Shelly Blu H&T** × 1 | Outdoor temp/humidity (BLE) |
 
-## Setup
+## Heating Zones
 
-### 1. Install dependencies
+| Zone | Thermostat | Sensors |
+|------|-----------|---------|
+| **Zone 1** (Ground) | Hall | Living Room, Dining Room, Porch |
+| **Zone 2** (First floor) | Master Bedroom | Guest Bedroom, Ensuite |
+| **Zone 3** (Top floor) | Top Floor Landing | Blanca Room, Stellas Room, Games Room |
+
+## Setup (Raspberry Pi)
+
+### 1. Install OS
+
+Flash **Raspberry Pi OS Lite (32-bit, Bookworm)** using Raspberry Pi Imager.
+
+### 2. Clone and install
 
 ```bash
+git clone https://github.com/MArkFitz69/LearnGitHubCoPilot.git
+cd LearnGitHubCoPilot
 pip install -r requirements.txt
 ```
 
-### 2. Verify network connectivity
-
-Make sure the Dongle-M is reachable on your network:
+### 3. Configure credentials
 
 ```bash
-ping 192.168.1.59
+# Set Hive credentials
+export HIVE_USERNAME=your-email@example.com
+export HIVE_PASSWORD=your-password
 ```
 
-The dongle exposes a TCP serial socket on port `6638` (EZSP/ember adapter). You can test connectivity:
+### 4. Discover Shelly Blu sensor
 
 ```bash
-python -c "import socket; s=socket.socket(); s.settimeout(3); s.connect(('192.168.1.59', 6638)); print('Connected!'); s.close()"
+python -m zigbee_sensor_reader --discover-shelly
 ```
 
-### 3. Configure
-
-Edit `zigbee_sensor_reader/config.py` or set environment variables:
-
-```bash
-# Set the dongle IP (default: 192.168.1.59)
-set ZIGBEE_HOST=192.168.1.59
-
-# Set the TCP port (default: 6638)
-set ZIGBEE_PORT=6638
-
-# Or override the full device path directly
-set ZIGBEE_DEVICE_PATH=socket://192.168.1.59:6638
-
-# Set polling interval in seconds (default: 60)
-set ZIGBEE_POLL_INTERVAL=30
-```
-
-### 4. Pair sensors
-
-Run in pairing mode, then hold the sensor button for 5+ seconds:
-
-```bash
-python -m zigbee_sensor_reader --pair
-```
-
-The program will print each sensor's IEEE address as it joins. Add friendly names in `config.py`:
+This will scan for 30 seconds and print the MAC address. Add it to `config.py`:
 
 ```python
-SENSOR_NAMES = {
-    "00:12:4b:00:25:e7:a1:c3": "Living Room",
-    "00:12:4b:00:25:e7:a1:c4": "Kitchen",
+SHELLY_SENSORS = {
+    "AA:BB:CC:DD:EE:FF": "Outside",
 }
+```
+
+### 5. Install systemd services
+
+```bash
+sudo cp zigbee_sensor_reader/zigbee-sensor-reader.service /etc/systemd/system/
+sudo cp zigbee_sensor_reader/sensor-data-api.service /etc/systemd/system/
+
+# Edit credentials in the service file
+sudo systemctl edit zigbee-sensor-reader
+
+# Enable and start
+sudo systemctl enable --now zigbee-sensor-reader
+sudo systemctl enable --now sensor-data-api
 ```
 
 ## Usage
@@ -83,42 +96,99 @@ SENSOR_NAMES = {
 python -m zigbee_sensor_reader
 ```
 
-### View sensor summary
+### Test Hive connection
 
 ```bash
-python -m zigbee_sensor_reader --summary
+python -m zigbee_sensor_reader --hive
 ```
 
-### Export to CSV
+### Discover Shelly Blu sensors
+
+```bash
+python -m zigbee_sensor_reader --discover-shelly
+```
+
+### Start web API server
+
+```bash
+python -m zigbee_sensor_reader --serve --port 8080
+```
+
+### Pair new Zigbee sensors
+
+```bash
+python -m zigbee_sensor_reader --pair
+```
+
+### Export data
 
 ```bash
 python -m zigbee_sensor_reader --export csv
-python -m zigbee_sensor_reader --export csv --start 2026-01-01 --end 2026-06-30
+python -m zigbee_sensor_reader --export xlsx
+python -m zigbee_sensor_reader --export csv --start 2026-01-01 --end 2026-03-31
 ```
 
-### Export to Excel (with per-sensor sheets)
+## Power BI Integration
+
+### Option 1: Web API (Recommended for live data)
+
+With the API server running on the Pi, in Power BI Desktop:
+
+1. **Get Data → Web**
+2. Enter URL: `http://<pi-ip>:8080/api/readings?format=csv`
+3. Set up scheduled refresh
+
+Available endpoints:
+
+| Endpoint | Description |
+|----------|-------------|
+| `/api/status` | System overview (sensor count, latest reading) |
+| `/api/sensors` | All registered sensors with zones |
+| `/api/readings?format=csv` | All readings as CSV |
+| `/api/readings?zone=Zone 1&format=csv` | Filter by zone |
+| `/api/readings?start=2026-01-01&end=2026-03-31&format=csv` | Filter by date |
+| `/api/readings/latest?format=csv` | Latest reading per sensor |
+| `/api/export/csv` | Download full CSV file |
+
+### Option 2: Export files
 
 ```bash
 python -m zigbee_sensor_reader --export xlsx
 ```
 
-## Power BI Integration
+Copy the Excel file to your PC and open in Power BI.
 
-1. Export to CSV or Excel using the commands above
-2. In Power BI Desktop: **Get Data → Text/CSV** or **Excel**
-3. The "All Sensors" sheet contains all data; per-sensor sheets are also available
-4. Key columns for analysis: `Timestamp`, `Sensor Name`, `Temperature (°C)`, `Humidity (%)`
+## Database Schema
 
-Alternatively, connect Power BI directly to the SQLite database (`sensor_data.db`) using an ODBC driver.
+```sql
+-- readings table (one row per measurement)
+SELECT timestamp, friendly_name, temperature_c, humidity_pct,
+       zone, heating_on, boost_on, target_temp_c, heating_mode
+FROM readings r JOIN sensors s ON r.ieee_address = s.ieee_address;
+```
+
+Key columns for heating analysis:
+- `temperature_c` — Actual room temperature
+- `target_temp_c` — Thermostat setpoint
+- `heating_on` — 1 = boiler firing, 0 = off
+- `boost_on` — 1 = boost override active
+- `heating_mode` — OFF / SCHEDULE / MANUAL
+- `zone` — Zone 1, Zone 2, or Zone 3
 
 ## Project Structure
 
 ```
 zigbee_sensor_reader/
 ├── __init__.py
-├── __main__.py      # CLI entry point
-├── config.py        # Configuration (serial port, sensor names, etc.)
-├── database.py      # SQLite storage layer
-├── zigbee_reader.py # Zigbee coordinator + sensor communication
-└── export.py        # CSV and Excel export functions
+├── __main__.py              # CLI entry point
+├── config.py                # Configuration (IPs, sensor names, zones)
+├── database.py              # SQLite storage layer
+├── zigbee_reader.py         # Zigbee coordinator (bellows/EZSP)
+├── hive_reader.py           # Hive cloud API integration
+├── shelly_ble_reader.py     # Shelly Blu H&T BLE scanner
+├── web_server.py            # Flask API for remote data access
+├── export.py                # CSV and Excel export
+├── zigbee-sensor-reader.service  # systemd: data collector
+└── sensor-data-api.service       # systemd: web API server
 ```
+

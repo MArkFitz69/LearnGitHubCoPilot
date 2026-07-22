@@ -88,3 +88,14 @@ ZONES: dict[str, str] = {
     "f4:b3:b1:ff:fe:5e:09:d8": "Zone 3",  # Games Room
     "Thermostat 6": "Zone 3",              # Top Floor Landing thermostat
 }
+
+# Shelly Blu H&T sensors (keyed by BLE MAC address, uppercase with colons)
+# Run `python -m zigbee_sensor_reader --discover-shelly` to find MAC addresses
+SHELLY_SENSORS: dict[str, str] = {
+    # MAC will be populated after first discovery scan
+    # "AA:BB:CC:DD:EE:FF": "Outside",
+}
+
+# BLE scan duration for Shelly sensors (seconds)
+# The Blu H&T advertises every ~3-10 minutes, so scan long enough to catch one
+SHELLY_SCAN_DURATION = int(os.environ.get("SHELLY_SCAN_DURATION", "120"))

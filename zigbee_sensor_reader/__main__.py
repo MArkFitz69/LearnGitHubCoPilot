@@ -105,6 +105,16 @@ async def run_collector(pair: bool = False) -> None:
             except Exception as e:
                 logger.debug("Hive poll skipped: %s", e)
 
+            # Poll Shelly Blu sensors via BLE (if bleak is available)
+            try:
+                from .shelly_ble_reader import poll_shelly_ble
+                from .config import SHELLY_SCAN_DURATION
+                await poll_shelly_ble(scan_duration=SHELLY_SCAN_DURATION)
+            except ImportError:
+                pass  # bleak not installed (e.g. running on Windows dev machine)
+            except Exception as e:
+                logger.debug("Shelly BLE poll skipped: %s", e)
+
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
@@ -158,8 +168,46 @@ Examples:
         action="store_true",
         help="Test Hive API connection and fetch current thermostat data",
     )
+    parser.add_argument(
+        "--discover-shelly",
+        action="store_true",
+        help="Scan for Shelly Blu H&T sensors via Bluetooth and show their MAC addresses",
+    )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="Start the web API server for remote data access (Power BI, Excel)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Port for the web API server (default: 8080)",
+    )
 
     args = parser.parse_args()
+
+    if args.discover_shelly:
+        from .shelly_ble_reader import discover_shelly_sensors
+        print("Scanning for Shelly Blu sensors (30 seconds)...")
+        print("Make sure the sensor is nearby and has battery.")
+        results = asyncio.run(discover_shelly_sensors(scan_duration=30.0))
+        if results:
+            print(f"\nFound {len(results)} sensor(s):")
+            for s in results:
+                print(f"  MAC: {s['mac']}  Name: {s.get('name', '?')}")
+                print(f"       Temp: {s.get('temperature', '?')}°C  "
+                      f"Humidity: {s.get('humidity', '?')}%  "
+                      f"Battery: {s.get('battery', '?')}%")
+            print("\nAdd the MAC address to SHELLY_SENSORS in config.py:")
+            for s in results:
+                print(f'    "{s["mac"]}": "Outside",')
+        else:
+            print("\nNo sensors found. Try:")
+            print("  - Moving the sensor closer to the Pi")
+            print("  - Pressing the button on the sensor to wake it")
+            print("  - Running the scan for longer (set SHELLY_SCAN_DURATION=60)")
+        return
 
     if args.hive:
         from .hive_reader import poll_hive, HIVE_USERNAME
@@ -179,6 +227,11 @@ Examples:
 
     if args.summary:
         get_sensor_summary()
+        return
+
+    if args.serve:
+        from .web_server import run_server
+        run_server(port=args.port)
         return
 
     if args.export:
