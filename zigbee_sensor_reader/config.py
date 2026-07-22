@@ -87,6 +87,8 @@ ZONES: dict[str, str] = {
     "f4:b3:b1:ff:fe:61:1b:f3": "Zone 3",  # Stellas Room
     "f4:b3:b1:ff:fe:5e:09:d8": "Zone 3",  # Games Room
     "Thermostat 6": "Zone 3",              # Top Floor Landing thermostat
+    # Zone 5 - Outside
+    "94:B2:16:08:82:98": "Zone 5",         # Outside (Shelly Blu H&T)
 }
 
 # Shelly Blu H&T sensors (keyed by BLE MAC address, uppercase with colons)
