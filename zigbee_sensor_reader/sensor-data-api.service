@@ -1,0 +1,14 @@
+[Unit]
+Description=Sensor Data Web API Server
+After=network.target zigbee-sensor-reader.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/LearnGitHubCoPilot
+ExecStart=/usr/bin/python3 -m zigbee_sensor_reader --serve --port 8080
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

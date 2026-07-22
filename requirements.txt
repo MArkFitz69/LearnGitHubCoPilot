@@ -1,2 +1,16 @@
 fastapi
 uvicorn
+
+# Zigbee sensor reader dependencies
+zigpy>=0.64.0
+bellows>=0.39.0
+openpyxl>=3.1.0
+
+# Hive thermostat integration
+pyhive-integration>=1.0.0
+
+# Shelly Blu H&T BLE sensor support
+bleak>=0.21.0
+
+# Web API for remote data access (Power BI, Excel, etc.)
+flask>=3.0.0

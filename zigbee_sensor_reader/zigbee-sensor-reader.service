@@ -1,0 +1,20 @@
+[Unit]
+Description=Zigbee Sensor Data Collector
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/LearnGitHubCoPilot
+ExecStart=/usr/bin/python3 -m zigbee_sensor_reader
+Restart=always
+RestartSec=10
+Environment=ZIGBEE_HOST=192.168.1.59
+Environment=ZIGBEE_PORT=6638
+Environment=HIVE_USERNAME=your-hive-email@example.com
+Environment=HIVE_PASSWORD=your-hive-password
+# Shelly BLE scan window (seconds) — sensor advertises every 3-10 mins
+Environment=SHELLY_SCAN_DURATION=120
+
+[Install]
+WantedBy=multi-user.target
