@@ -1,10 +1,11 @@
 # Sonoff Zigbee Sensor Reader
 
-Python application to collect temperature and humidity data from **Sonoff SNZB-02** (and similar) Zigbee sensors via a **Sonoff Zigbee Dongle-M** (EFR32MG21 / EZSP).
+Python application to collect temperature and humidity data from **Sonoff SNZB-02** (and similar) Zigbee sensors via a **Sonoff Zigbee Dongle-M** connected over Ethernet.
 
 ## Features
 
 - 🌡️ Reads temperature, humidity, and battery level from 10+ sensors
+- 🌐 Connects to Dongle-M over your local network (Ethernet/TCP socket)
 - 💾 Stores readings in a local SQLite database
 - 📊 Exports to **CSV** and **Excel** for Power BI / Excel analysis
 - 🔗 Auto-discovers new sensors when they join the network
@@ -14,7 +15,7 @@ Python application to collect temperature and humidity data from **Sonoff SNZB-0
 
 | Item | Notes |
 |------|-------|
-| **Sonoff Zigbee Dongle-M** | USB coordinator (EFR32MG21, EZSP protocol) |
+| **Sonoff Zigbee Dongle-M** | Coordinator connected via Ethernet (EFR32MG21, EZSP protocol) |
 | **Sonoff SNZB-02 / SNZB-02D / SNZB-02P** | Temperature & humidity sensors |
 
 ## Setup
@@ -25,19 +26,33 @@ Python application to collect temperature and humidity data from **Sonoff SNZB-0
 pip install -r requirements.txt
 ```
 
-### 2. Find your serial port
+### 2. Verify network connectivity
 
-- **Windows**: Open Device Manager → Ports (COM & LPT) → look for "Silicon Labs" or "Sonoff" → note the COM port (e.g. `COM3`)
-- **Linux**: `ls /dev/ttyUSB*` or `ls /dev/ttyACM*`
-- **macOS**: `ls /dev/tty.usbserial-*`
+Make sure the Dongle-M is reachable on your network:
+
+```bash
+ping 192.168.1.59
+```
+
+The dongle exposes a TCP serial socket (typically port `8888`). You can test connectivity:
+
+```bash
+python -c "import socket; s=socket.socket(); s.settimeout(3); s.connect(('192.168.1.59', 8888)); print('Connected!'); s.close()"
+```
 
 ### 3. Configure
 
 Edit `zigbee_sensor_reader/config.py` or set environment variables:
 
 ```bash
-# Set the serial port (default: COM3)
-set ZIGBEE_SERIAL_PORT=COM4
+# Set the dongle IP (default: 192.168.1.59)
+set ZIGBEE_HOST=192.168.1.59
+
+# Set the TCP port (default: 8888)
+set ZIGBEE_PORT=8888
+
+# Or override the full device path directly
+set ZIGBEE_DEVICE_PATH=socket://192.168.1.59:8888
 
 # Set polling interval in seconds (default: 60)
 set ZIGBEE_POLL_INTERVAL=30

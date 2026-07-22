@@ -2,7 +2,8 @@
 Configuration for Zigbee sensor reader.
 
 Edit these settings to match your setup:
-- SERIAL_PORT: The COM port or /dev/tty path for your Sonoff Dongle-M
+- ZIGBEE_HOST: IP address of the Sonoff Dongle-M on your network
+- ZIGBEE_PORT: TCP port (typically 8888 for EZSP-based dongles)
 - DATABASE_PATH: Where to store the SQLite database
 - POLLING_INTERVAL: How often to read sensors (seconds)
 - SENSOR_NAMES: Friendly names for your sensors (keyed by IEEE address)
@@ -10,11 +11,17 @@ Edit these settings to match your setup:
 
 import os
 
-# Serial port for the Sonoff Zigbee Dongle-M
-# Windows: "COM3", "COM4", etc. (check Device Manager)
-# Linux:   "/dev/ttyUSB0" or "/dev/ttyACM0"
-# macOS:   "/dev/tty.usbserial-xxxx"
-SERIAL_PORT = os.environ.get("ZIGBEE_SERIAL_PORT", "COM3")
+# Network connection for the Sonoff Zigbee Dongle-M (Ethernet)
+# The dongle exposes a TCP serial socket on the network
+ZIGBEE_HOST = os.environ.get("ZIGBEE_HOST", "192.168.1.59")
+ZIGBEE_PORT = int(os.environ.get("ZIGBEE_PORT", "8888"))
+
+# Connection string for zigpy/bellows (socket:// for network, COMx for USB)
+# Override with ZIGBEE_DEVICE_PATH env var for custom setups
+DEVICE_PATH = os.environ.get(
+    "ZIGBEE_DEVICE_PATH",
+    f"socket://{ZIGBEE_HOST}:{ZIGBEE_PORT}",
+)
 SERIAL_BAUDRATE = 115200
 
 # Database configuration
