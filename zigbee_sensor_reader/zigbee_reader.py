@@ -77,8 +77,9 @@ class ZigbeeSensorListener:
             zigpy_conf.CONF_DATABASE: "zigbee_network.db",
             zigpy_conf.CONF_DEVICE: {
                 zigpy_conf.CONF_DEVICE_PATH: DEVICE_PATH,
-                zigpy_conf.CONF_DEVICE_BAUDRATE: SERIAL_BAUDRATE,
-                "flow_control": "hardware" if FLOW_CONTROL else "software",
+            },
+            zigpy_conf.CONF_OTA: {
+                zigpy_conf.CONF_OTA_ENABLED: False,
             },
         }
 
@@ -87,15 +88,13 @@ class ZigbeeSensorListener:
         from bellows.zigbee.application import ControllerApplication as BellowsApp
 
         config = self._get_zigpy_config()
-        schema = BellowsApp.SCHEMA(config)
 
-        self.app = await BellowsApp.new(schema)
+        # Pass raw config — BellowsApp.new() validates internally
+        # auto_form=True creates a new Zigbee network on first run
+        self.app = await BellowsApp.new(config, auto_form=True)
 
         # Register our listener for device attribute reports
         self.app.add_listener(self)
-
-        # Start the network – joins existing network or forms a new one
-        await self.app.startup(auto_form=True)
 
         logger.info(
             "Zigbee coordinator started on %s. Network channel: %s",

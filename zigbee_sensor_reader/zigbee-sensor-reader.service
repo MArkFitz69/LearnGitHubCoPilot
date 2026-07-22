@@ -1,0 +1,19 @@
+[Unit]
+Description=Zigbee Sensor Data Collector
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/LearnGitHubCoPilot
+ExecStart=/usr/bin/python3 -m zigbee_sensor_reader
+Restart=always
+RestartSec=10
+Environment=ZIGBEE_HOST=192.168.1.59
+Environment=ZIGBEE_PORT=6638
+# Hive credentials (uncomment and fill in to enable Hive polling)
+#Environment=HIVE_USERNAME=your-email@example.com
+#Environment=HIVE_PASSWORD=your-password
+
+[Install]
+WantedBy=multi-user.target

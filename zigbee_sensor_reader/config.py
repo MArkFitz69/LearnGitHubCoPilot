@@ -51,6 +51,12 @@ EXPORT_DIR = os.environ.get(
 # Example:
 #   "00:12:4b:00:25:e7:a1:c3": "Living Room",
 SENSOR_NAMES: dict[str, str] = {
-    # "00:12:4b:00:xx:xx:xx:xx": "Kitchen",
-    # "00:12:4b:00:yy:yy:yy:yy": "Bedroom",
+    "f4:b3:b1:ff:fe:60:ae:82": "Living Room",
+    "a4:c1:38:0a:d3:e2:ff:ff": "Dining Room",
+    "a4:c1:38:0a:ca:6f:ff:ff": "Porch",
+    "a4:c1:38:0a:b8:01:ff:ff": "Guest Bedroom",
+    "f4:b3:b1:ff:fe:61:0f:ea": "Ensuite",
+    "a4:c1:38:0a:d9:4a:ff:ff": "Blanca Room",
+    "f4:b3:b1:ff:fe:61:1b:f3": "Stellas Room",
+    "f4:b3:b1:ff:fe:5e:09:d8": "Games Room",
 }

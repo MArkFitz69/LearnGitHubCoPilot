@@ -87,9 +87,18 @@ async def run_collector(pair: bool = False) -> None:
         )
 
         # Sensors report asynchronously via attribute_updated callback
+        # Also poll Hive thermostats on each interval
         while True:
             await asyncio.sleep(POLLING_INTERVAL)
             logger.debug("Heartbeat – still listening...")
+
+            # Poll Hive if credentials are configured
+            try:
+                from .hive_reader import poll_hive, HIVE_USERNAME
+                if HIVE_USERNAME:
+                    await poll_hive()
+            except Exception as e:
+                logger.debug("Hive poll skipped: %s", e)
 
     except KeyboardInterrupt:
         logger.info("Shutting down...")
@@ -139,8 +148,29 @@ Examples:
         "--sensor",
         help="Filter to a specific sensor IEEE address",
     )
+    parser.add_argument(
+        "--hive",
+        action="store_true",
+        help="Test Hive API connection and fetch current thermostat data",
+    )
 
     args = parser.parse_args()
+
+    if args.hive:
+        from .hive_reader import poll_hive, HIVE_USERNAME
+        if not HIVE_USERNAME:
+            print("Set HIVE_USERNAME and HIVE_PASSWORD environment variables first.")
+            return
+        print("Connecting to Hive API...")
+        readings = asyncio.run(poll_hive())
+        if readings:
+            print(f"\nFound {len(readings)} thermostat(s):")
+            for r in readings:
+                print(f"  {r['name']}: {r['temperature_c']}°C "
+                      f"(target: {r['target_temp_c']}°C, mode: {r['mode']})")
+        else:
+            print("No thermostat data returned. Check credentials.")
+        return
 
     if args.summary:
         get_sensor_summary()
