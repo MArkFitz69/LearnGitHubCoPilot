@@ -33,6 +33,7 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             ieee_address  TEXT PRIMARY KEY,
             friendly_name TEXT,
             model         TEXT,
+            zone          TEXT,
             first_seen    TEXT NOT NULL,
             last_seen     TEXT NOT NULL
         );
@@ -45,6 +46,7 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             humidity_pct  REAL,
             battery_pct   REAL,
             link_quality  INTEGER,
+            zone          TEXT,
             FOREIGN KEY (ieee_address) REFERENCES sensors(ieee_address)
         );
 
@@ -53,8 +55,17 @@ def _create_tables(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_readings_timestamp
             ON readings (timestamp);
+
+        CREATE INDEX IF NOT EXISTS idx_readings_zone
+            ON readings (zone);
         """
     )
+    # Add zone column to existing databases (safe to run multiple times)
+    for table in ("sensors", "readings"):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN zone TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
     conn.commit()
 
 
@@ -63,19 +74,21 @@ def upsert_sensor(
     ieee_address: str,
     friendly_name: str | None = None,
     model: str | None = None,
+    zone: str | None = None,
 ) -> None:
     """Insert or update a sensor in the registry."""
     now = datetime.utcnow().isoformat()
     conn.execute(
         """
-        INSERT INTO sensors (ieee_address, friendly_name, model, first_seen, last_seen)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO sensors (ieee_address, friendly_name, model, zone, first_seen, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(ieee_address) DO UPDATE SET
             friendly_name = COALESCE(excluded.friendly_name, sensors.friendly_name),
             model         = COALESCE(excluded.model, sensors.model),
+            zone          = COALESCE(excluded.zone, sensors.zone),
             last_seen     = excluded.last_seen
         """,
-        (ieee_address, friendly_name, model, now, now),
+        (ieee_address, friendly_name, model, zone, now, now),
     )
     conn.commit()
 
@@ -87,15 +100,16 @@ def insert_reading(
     humidity_pct: float | None,
     battery_pct: float | None = None,
     link_quality: int | None = None,
+    zone: str | None = None,
 ) -> None:
     """Store a single sensor reading."""
     now = datetime.utcnow().isoformat()
     conn.execute(
         """
-        INSERT INTO readings (ieee_address, timestamp, temperature_c, humidity_pct, battery_pct, link_quality)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO readings (ieee_address, timestamp, temperature_c, humidity_pct, battery_pct, link_quality, zone)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (ieee_address, now, temperature_c, humidity_pct, battery_pct, link_quality),
+        (ieee_address, now, temperature_c, humidity_pct, battery_pct, link_quality, zone),
     )
     # Also touch the sensor's last_seen
     conn.execute(

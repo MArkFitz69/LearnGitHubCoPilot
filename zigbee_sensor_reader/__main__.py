@@ -14,7 +14,7 @@ import asyncio
 import logging
 import sys
 
-from .config import POLLING_INTERVAL, SENSOR_NAMES
+from .config import POLLING_INTERVAL, SENSOR_NAMES, ZONES
 from .database import get_connection, insert_reading, upsert_sensor
 from .export import export_to_csv, export_to_excel, get_sensor_summary
 
@@ -28,11 +28,13 @@ logger = logging.getLogger(__name__)
 
 def handle_reading(reading, conn) -> None:
     """Process an incoming sensor reading: store in DB and print to console."""
+    zone = ZONES.get(reading.ieee_address)
     upsert_sensor(
         conn,
         ieee_address=reading.ieee_address,
         friendly_name=reading.friendly_name,
         model=reading.model,
+        zone=zone,
     )
 
     insert_reading(
@@ -42,9 +44,12 @@ def handle_reading(reading, conn) -> None:
         humidity_pct=reading.humidity_pct,
         battery_pct=reading.battery_pct,
         link_quality=reading.link_quality,
+        zone=zone,
     )
 
     parts = [f"[{reading.friendly_name}]"]
+    if zone:
+        parts.append(f"({zone})")
     if reading.temperature_c is not None:
         parts.append(f"Temp: {reading.temperature_c:.1f}°C")
     if reading.humidity_pct is not None:
@@ -64,7 +69,7 @@ async def run_collector(pair: bool = False) -> None:
 
     # Register any pre-configured sensor names
     for ieee, name in SENSOR_NAMES.items():
-        upsert_sensor(conn, ieee_address=ieee, friendly_name=name)
+        upsert_sensor(conn, ieee_address=ieee, friendly_name=name, zone=ZONES.get(ieee))
 
     listener = ZigbeeSensorListener(
         on_reading=lambda reading: handle_reading(reading, conn)

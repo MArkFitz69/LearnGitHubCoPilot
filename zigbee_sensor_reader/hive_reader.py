@@ -14,6 +14,7 @@ import logging
 import os
 from datetime import datetime
 
+from .config import HIVE_NAMES, ZONES
 from .database import get_connection, upsert_sensor, insert_reading
 
 logger = logging.getLogger(__name__)
@@ -28,9 +29,9 @@ async def fetch_hive_data() -> list[dict]:
     Connect to the Hive API and fetch thermostat data.
 
     Returns a list of dicts with keys:
-        name, temperature_c, target_temp_c, mode, heating_on, battery_pct
+        name, device_id, temperature_c, target_temp_c, mode, battery_pct
     """
-    from apyhiveapi import Auth, Hive
+    from apyhiveapi import Hive
 
     if not HIVE_USERNAME or not HIVE_PASSWORD:
         logger.error(
@@ -40,56 +41,58 @@ async def fetch_hive_data() -> list[dict]:
         return []
 
     try:
-        # Authenticate
-        auth = Auth(username=HIVE_USERNAME, password=HIVE_PASSWORD)
-        tokens = await auth.login()
-
-        # Start session
+        # Login and start session
         hive = Hive(username=HIVE_USERNAME, password=HIVE_PASSWORD)
-        await hive.startSession({"tokens": tokens})
+        login_result = await hive.login()
+
+        # Check for 2FA
+        if isinstance(login_result, dict) and login_result.get("ChallengeName") == "SMS_MFA":
+            logger.error(
+                "Hive account requires SMS 2FA. This is not supported in "
+                "unattended mode. Disable 2FA or use an app-specific password."
+            )
+            return []
+
+        session = await hive.startSession()
 
         results = []
 
-        # Get heating devices
-        for device_id, device in hive.session.data.devices.items():
-            device_type = device.get("type", "")
-            device_name = device.get("state", {}).get("name", device_id)
+        # Iterate over climate (thermostat) devices
+        for dev in session.get("climate", []):
+            hive_name = dev.get("hiveName", "Unknown")
+            device_id = dev.get("hiveID", dev.get("device_id", "unknown"))
+            # Use friendly name from config, fall back to Hive's name
+            friendly_name = HIVE_NAMES.get(hive_name, hive_name)
 
-            # Look for thermostat/heating devices
-            if device_type in ("heating", "thermostatui", "thermostat"):
-                try:
-                    heating_data = {
-                        "name": device_name,
-                        "device_id": device_id,
-                        "temperature_c": None,
-                        "target_temp_c": None,
-                        "mode": None,
-                        "heating_on": None,
-                    }
+            try:
+                # Get current and target temperature via the heating helper
+                temp = await hive.heating.getCurrentTemperature(dev)
+                target = await hive.heating.getTargetTemperature(dev)
+                mode = await hive.heating.getMode(dev)
 
-                    # Try to get current temperature
-                    if hasattr(hive, "heating"):
-                        temp = await hive.heating.current_temperature(device)
-                        if temp is not None:
-                            heating_data["temperature_c"] = float(temp)
+                # Battery from deviceData
+                battery = dev.get("deviceData", {}).get("battery")
 
-                        target = await hive.heating.target_temperature(device)
-                        if target is not None:
-                            heating_data["target_temp_c"] = float(target)
+                heating_data = {
+                    "name": friendly_name,
+                    "device_id": device_id,
+                    "temperature_c": float(temp) if temp is not None else None,
+                    "target_temp_c": float(target) if target is not None else None,
+                    "mode": mode,
+                    "battery_pct": battery,
+                    "zone": ZONES.get(hive_name),
+                }
 
-                        mode = await hive.heating.get_mode(device)
-                        heating_data["mode"] = mode
-
-                    results.append(heating_data)
-                    logger.info(
-                        "Hive %s: %.1f°C (target: %.1f°C, mode: %s)",
-                        device_name,
-                        heating_data["temperature_c"] or 0,
-                        heating_data["target_temp_c"] or 0,
-                        heating_data["mode"],
-                    )
-                except Exception as e:
-                    logger.warning("Failed to read Hive device %s: %s", device_name, e)
+                results.append(heating_data)
+                logger.info(
+                    "Hive %s: %.1f°C (target: %.1f°C, mode: %s)",
+                    friendly_name,
+                    heating_data["temperature_c"] or 0,
+                    heating_data["target_temp_c"] or 0,
+                    heating_data["mode"],
+                )
+            except Exception as e:
+                logger.warning("Failed to read Hive device %s: %s", friendly_name, e)
 
         return results
 
@@ -106,12 +109,14 @@ def store_hive_readings(readings: list[dict]) -> None:
         # Use "hive:" prefix to distinguish from Zigbee sensors
         ieee_address = f"hive:{reading['device_id']}"
         friendly_name = f"Hive {reading['name']}"
+        zone = reading.get("zone")
 
         upsert_sensor(
             conn,
             ieee_address=ieee_address,
             friendly_name=friendly_name,
             model="Hive Thermostat",
+            zone=zone,
         )
 
         insert_reading(
@@ -119,7 +124,8 @@ def store_hive_readings(readings: list[dict]) -> None:
             ieee_address=ieee_address,
             temperature_c=reading.get("temperature_c"),
             humidity_pct=None,  # Hive doesn't report humidity
-            battery_pct=None,
+            battery_pct=reading.get("battery_pct"),
+            zone=zone,
         )
 
     conn.close()
