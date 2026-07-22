@@ -69,9 +69,14 @@ async def fetch_hive_data() -> list[dict]:
                 temp = await hive.heating.getCurrentTemperature(dev)
                 target = await hive.heating.getTargetTemperature(dev)
                 mode = await hive.heating.getMode(dev)
+                state = await hive.heating.getState(dev)
+                boost = await hive.heating.getBoostStatus(dev)
 
                 # Battery from deviceData
                 battery = dev.get("deviceData", {}).get("battery")
+
+                # Heating is on if state is not OFF
+                heating_on = state not in ("OFF", None, False)
 
                 heating_data = {
                     "name": friendly_name,
@@ -79,17 +84,21 @@ async def fetch_hive_data() -> list[dict]:
                     "temperature_c": float(temp) if temp is not None else None,
                     "target_temp_c": float(target) if target is not None else None,
                     "mode": mode,
+                    "heating_on": heating_on,
+                    "boost": boost,
                     "battery_pct": battery,
                     "zone": ZONES.get(hive_name),
                 }
 
                 results.append(heating_data)
+                heat_status = "HEATING" if heating_on else "off"
                 logger.info(
-                    "Hive %s: %.1f°C (target: %.1f°C, mode: %s)",
+                    "Hive %s: %.1f°C (target: %.1f°C, mode: %s, heating: %s)",
                     friendly_name,
                     heating_data["temperature_c"] or 0,
                     heating_data["target_temp_c"] or 0,
                     heating_data["mode"],
+                    heat_status,
                 )
             except Exception as e:
                 logger.warning("Failed to read Hive device %s: %s", friendly_name, e)
@@ -126,6 +135,7 @@ def store_hive_readings(readings: list[dict]) -> None:
             humidity_pct=None,  # Hive doesn't report humidity
             battery_pct=reading.get("battery_pct"),
             zone=zone,
+            heating_on=reading.get("heating_on"),
         )
 
     conn.close()

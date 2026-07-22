@@ -47,6 +47,7 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             battery_pct   REAL,
             link_quality  INTEGER,
             zone          TEXT,
+            heating_on    INTEGER,
             FOREIGN KEY (ieee_address) REFERENCES sensors(ieee_address)
         );
 
@@ -60,10 +61,10 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             ON readings (zone);
         """
     )
-    # Add zone column to existing databases (safe to run multiple times)
-    for table in ("sensors", "readings"):
+    # Add columns to existing databases (safe to run multiple times)
+    for col, table in [("zone", "sensors"), ("zone", "readings"), ("heating_on", "readings")]:
         try:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN zone TEXT")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {'TEXT' if col == 'zone' else 'INTEGER'}")
         except sqlite3.OperationalError:
             pass  # column already exists
     conn.commit()
@@ -101,15 +102,17 @@ def insert_reading(
     battery_pct: float | None = None,
     link_quality: int | None = None,
     zone: str | None = None,
+    heating_on: bool | None = None,
 ) -> None:
     """Store a single sensor reading."""
     now = datetime.utcnow().isoformat()
+    heating_int = int(heating_on) if heating_on is not None else None
     conn.execute(
         """
-        INSERT INTO readings (ieee_address, timestamp, temperature_c, humidity_pct, battery_pct, link_quality, zone)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO readings (ieee_address, timestamp, temperature_c, humidity_pct, battery_pct, link_quality, zone, heating_on)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (ieee_address, now, temperature_c, humidity_pct, battery_pct, link_quality, zone),
+        (ieee_address, now, temperature_c, humidity_pct, battery_pct, link_quality, zone, heating_int),
     )
     # Also touch the sensor's last_seen
     conn.execute(
