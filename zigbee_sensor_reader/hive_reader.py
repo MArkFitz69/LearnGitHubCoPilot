@@ -136,6 +136,9 @@ def store_hive_readings(readings: list[dict]) -> None:
             battery_pct=reading.get("battery_pct"),
             zone=zone,
             heating_on=reading.get("heating_on"),
+            boost_on=reading.get("boost") not in ("OFF", None, False),
+            target_temp_c=reading.get("target_temp_c"),
+            heating_mode=reading.get("mode"),
         )
 
     conn.close()

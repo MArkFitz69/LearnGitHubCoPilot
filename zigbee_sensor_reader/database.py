@@ -48,6 +48,9 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             link_quality  INTEGER,
             zone          TEXT,
             heating_on    INTEGER,
+            boost_on      INTEGER,
+            target_temp_c REAL,
+            heating_mode  TEXT,
             FOREIGN KEY (ieee_address) REFERENCES sensors(ieee_address)
         );
 
@@ -62,9 +65,17 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         """
     )
     # Add columns to existing databases (safe to run multiple times)
-    for col, table in [("zone", "sensors"), ("zone", "readings"), ("heating_on", "readings")]:
+    migrations = [
+        ("sensors", "zone", "TEXT"),
+        ("readings", "zone", "TEXT"),
+        ("readings", "heating_on", "INTEGER"),
+        ("readings", "boost_on", "INTEGER"),
+        ("readings", "target_temp_c", "REAL"),
+        ("readings", "heating_mode", "TEXT"),
+    ]
+    for table, col, col_type in migrations:
         try:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {'TEXT' if col == 'zone' else 'INTEGER'}")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError:
             pass  # column already exists
     conn.commit()
@@ -103,16 +114,22 @@ def insert_reading(
     link_quality: int | None = None,
     zone: str | None = None,
     heating_on: bool | None = None,
+    boost_on: bool | None = None,
+    target_temp_c: float | None = None,
+    heating_mode: str | None = None,
 ) -> None:
     """Store a single sensor reading."""
     now = datetime.utcnow().isoformat()
     heating_int = int(heating_on) if heating_on is not None else None
+    boost_int = int(boost_on) if boost_on is not None else None
     conn.execute(
         """
-        INSERT INTO readings (ieee_address, timestamp, temperature_c, humidity_pct, battery_pct, link_quality, zone, heating_on)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO readings (ieee_address, timestamp, temperature_c, humidity_pct,
+            battery_pct, link_quality, zone, heating_on, boost_on, target_temp_c, heating_mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (ieee_address, now, temperature_c, humidity_pct, battery_pct, link_quality, zone, heating_int),
+        (ieee_address, now, temperature_c, humidity_pct, battery_pct, link_quality,
+         zone, heating_int, boost_int, target_temp_c, heating_mode),
     )
     # Also touch the sensor's last_seen
     conn.execute(
