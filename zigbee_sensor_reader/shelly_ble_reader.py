@@ -28,6 +28,7 @@ BTHOME_UUID = "0000fcd2-0000-1000-8000-00805f9b34fb"
 
 # BTHome v2 object IDs and their (length, scale, signed) properties
 BTHOME_OBJECTS = {
+    0x00: ("packet_id", 1, 1, False),      # uint8, rolling packet counter
     0x01: ("battery", 1, 1, False),        # uint8, 1%
     0x02: ("temperature", 2, 0.01, True),  # sint16, 0.01°C
     0x03: ("humidity", 2, 0.01, False),    # uint16, 0.01%
