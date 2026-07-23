@@ -92,7 +92,7 @@ def _calculate_hive_runtime_seconds(conn: sqlite3.Connection, day: str) -> dict[
     for row in rows:
         grouped.setdefault(row["ieee_address"], []).append(row)
 
-    now = datetime.utcnow()
+    now = datetime.now()
     runtimes: dict[str, float] = {}
     for ieee_address, samples in grouped.items():
         total_seconds = 0.0
@@ -132,7 +132,7 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
         """
     ).fetchall()
 
-    today_utc = datetime.utcnow().strftime("%Y-%m-%d")
+    today_local = datetime.now().strftime("%Y-%m-%d")
     daily_rows = conn.execute(
         """
         SELECT ieee_address,
@@ -144,10 +144,10 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
         WHERE substr(timestamp, 1, 10) = ?
         GROUP BY ieee_address
         """,
-        (today_utc,),
+        (today_local,),
     ).fetchall()
     daily_by_sensor = {row["ieee_address"]: dict(row) for row in daily_rows}
-    hive_runtime_seconds = _calculate_hive_runtime_seconds(conn, today_utc)
+    hive_runtime_seconds = _calculate_hive_runtime_seconds(conn, today_local)
 
     sonoff = []
     shelly = []
@@ -204,8 +204,11 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
     shelly.sort(key=lambda row: (_zone_sort_key(row.get("zone")), row.get("friendly_name") or row.get("ieee_address")))
 
     return {
-        "date_utc": today_utc,
-        "generated_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
+        "date_local": today_local,
+        "generated_at_local": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        # Backward-compatible aliases used by earlier dashboard/API responses.
+        "date_utc": today_local,
+        "generated_at_utc": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "sonoff": sonoff,
         "shelly": shelly,
         "hive": hive,
@@ -228,7 +231,7 @@ def api_status():
         "sensors": sensor_count,
         "total_readings": reading_count,
         "latest_reading": latest,
-        "server_time": datetime.utcnow().isoformat(),
+        "server_time": datetime.now().isoformat(),
     })
 
 
@@ -271,7 +274,7 @@ def dashboard():
 </head>
 <body>
   <h1>Home Sensor Dashboard</h1>
-  <div class="meta">Generated (UTC): {{ generated_at_utc }} | Auto-refresh: 60s</div>
+  <div class="meta">Generated (Local): {{ generated_at_local or generated_at_utc }} | Auto-refresh: 60s</div>
 
   <h2>Sonoff Sensors (SNZB-02D / SNZB-02DR2)</h2>
   <table>
@@ -507,7 +510,7 @@ def _rows_to_csv(rows, download: bool = False) -> Response:
 
     headers = {}
     if download:
-        filename = f"sensor_data_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+        filename = f"sensor_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         headers["Content-Disposition"] = f"attachment; filename={filename}"
 
     return Response(
