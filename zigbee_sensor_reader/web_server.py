@@ -30,7 +30,7 @@ import logging
 import sqlite3
 from datetime import datetime
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, render_template_string, request
 
 from .config import DATABASE_PATH
 
@@ -44,6 +44,152 @@ def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(f"file:{DATABASE_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _parse_iso_timestamp(value: str) -> datetime:
+    """Parse timestamps stored in SQLite."""
+    return datetime.fromisoformat(value)
+
+
+def _format_duration_hhmm(seconds: float) -> str:
+    """Format duration as HH:MM."""
+    total_seconds = max(int(seconds), 0)
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    return f"{hours:02d}:{minutes:02d}"
+
+
+def _calculate_hive_runtime_seconds(conn: sqlite3.Connection, day: str) -> dict[str, float]:
+    """
+    Calculate today's runtime in seconds for each Hive thermostat.
+
+    Runtime is computed from sampled heating_on states by summing intervals where
+    heating_on=1 from each sample time to the next sample time.
+    """
+    rows = conn.execute(
+        """
+        SELECT ieee_address, timestamp, heating_on
+        FROM readings
+        WHERE ieee_address LIKE 'hive:%'
+          AND substr(timestamp, 1, 10) = ?
+        ORDER BY ieee_address, timestamp
+        """,
+        (day,),
+    ).fetchall()
+
+    grouped: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        grouped.setdefault(row["ieee_address"], []).append(row)
+
+    now = datetime.utcnow()
+    runtimes: dict[str, float] = {}
+    for ieee_address, samples in grouped.items():
+        total_seconds = 0.0
+        for index, sample in enumerate(samples):
+            if sample["heating_on"] != 1:
+                continue
+
+            current_ts = _parse_iso_timestamp(sample["timestamp"])
+            if index + 1 < len(samples):
+                next_ts = _parse_iso_timestamp(samples[index + 1]["timestamp"])
+            else:
+                next_ts = now
+
+            if next_ts > current_ts:
+                total_seconds += (next_ts - current_ts).total_seconds()
+
+        runtimes[ieee_address] = total_seconds
+
+    return runtimes
+
+
+def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
+    """Build a dashboard snapshot for API and HTML rendering."""
+    latest_rows = conn.execute(
+        """
+        SELECT r.ieee_address, s.friendly_name, s.model, r.timestamp,
+               r.temperature_c, r.humidity_pct, r.battery_pct, r.zone,
+               r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode
+        FROM readings r
+        INNER JOIN (
+            SELECT ieee_address, MAX(timestamp) AS max_ts
+            FROM readings
+            GROUP BY ieee_address
+        ) latest ON r.ieee_address = latest.ieee_address AND r.timestamp = latest.max_ts
+        LEFT JOIN sensors s ON r.ieee_address = s.ieee_address
+        ORDER BY s.friendly_name
+        """
+    ).fetchall()
+
+    today_utc = datetime.utcnow().strftime("%Y-%m-%d")
+    daily_rows = conn.execute(
+        """
+        SELECT ieee_address,
+               MIN(temperature_c) AS min_temp_c,
+               MAX(temperature_c) AS max_temp_c,
+               MIN(humidity_pct) AS min_humidity_pct,
+               MAX(humidity_pct) AS max_humidity_pct
+        FROM readings
+        WHERE substr(timestamp, 1, 10) = ?
+        GROUP BY ieee_address
+        """,
+        (today_utc,),
+    ).fetchall()
+    daily_by_sensor = {row["ieee_address"]: dict(row) for row in daily_rows}
+    hive_runtime_seconds = _calculate_hive_runtime_seconds(conn, today_utc)
+
+    sonoff = []
+    shelly = []
+    hive = []
+
+    for row in latest_rows:
+        ieee_address = row["ieee_address"]
+        model = row["model"] or ""
+        latest = dict(row)
+        daily = daily_by_sensor.get(ieee_address, {})
+
+        if ieee_address.startswith("hive:"):
+            heating_on = row["heating_on"] == 1
+            boost_on = row["boost_on"] == 1
+            if boost_on:
+                status = "boost"
+            elif heating_on:
+                status = "on"
+            else:
+                status = "off"
+
+            hive.append(
+                {
+                    **latest,
+                    "status": status,
+                    "runtime_today_seconds": hive_runtime_seconds.get(ieee_address, 0.0),
+                    "runtime_today_hhmm": _format_duration_hhmm(
+                        hive_runtime_seconds.get(ieee_address, 0.0)
+                    ),
+                }
+            )
+            continue
+
+        sensor_row = {
+            **latest,
+            "min_temp_c": daily.get("min_temp_c"),
+            "max_temp_c": daily.get("max_temp_c"),
+            "min_humidity_pct": daily.get("min_humidity_pct"),
+            "max_humidity_pct": daily.get("max_humidity_pct"),
+        }
+
+        if model == "SNZB-02DR2":
+            sonoff.append(sensor_row)
+        elif ieee_address.startswith("shelly:") or model == "Shelly Blu H&T":
+            shelly.append(sensor_row)
+
+    return {
+        "date_utc": today_utc,
+        "generated_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
+        "sonoff": sonoff,
+        "shelly": shelly,
+        "hive": hive,
+    }
 
 
 @app.route("/api/status")
@@ -64,6 +210,139 @@ def api_status():
         "latest_reading": latest,
         "server_time": datetime.utcnow().isoformat(),
     })
+
+
+@app.route("/api/dashboard")
+def api_dashboard():
+    """Dashboard data for UI and integrations."""
+    conn = get_db()
+    snapshot = _build_dashboard_snapshot(conn)
+    conn.close()
+    return jsonify(snapshot)
+
+
+@app.route("/")
+@app.route("/dashboard")
+def dashboard():
+    """Simple web dashboard for current and daily sensor metrics."""
+    conn = get_db()
+    snapshot = _build_dashboard_snapshot(conn)
+    conn.close()
+
+    html = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="60">
+  <title>Home Sensor Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; color: #222; }
+    h1, h2 { margin-bottom: 8px; }
+    .meta { color: #666; margin-bottom: 16px; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background: #f4f4f4; }
+    .status-on { color: #0b7a0b; font-weight: bold; }
+    .status-off { color: #a33; font-weight: bold; }
+    .status-boost { color: #8a2be2; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>Home Sensor Dashboard</h1>
+  <div class="meta">Generated (UTC): {{ generated_at_utc }} | Auto-refresh: 60s</div>
+
+  <h2>Sonoff Sensors (SNZB-02DR2)</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Sensor</th><th>Zone</th><th>Timestamp</th><th>Temp (C)</th><th>Humidity (%)</th>
+        <th>Daily Low/High Temp (C)</th><th>Daily Low/High Humidity (%)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in sonoff %}
+      <tr>
+        <td>{{ s.friendly_name or s.ieee_address }}</td>
+        <td>{{ s.zone or "-" }}</td>
+        <td>{{ s.timestamp }}</td>
+        <td>{% if s.temperature_c is not none %}{{ "%.1f"|format(s.temperature_c) }}{% else %}-{% endif %}</td>
+        <td>{% if s.humidity_pct is not none %}{{ "%.1f"|format(s.humidity_pct) }}{% else %}-{% endif %}</td>
+        <td>
+          {% if s.min_temp_c is not none and s.max_temp_c is not none %}
+            {{ "%.1f"|format(s.min_temp_c) }} / {{ "%.1f"|format(s.max_temp_c) }}
+          {% else %}-{% endif %}
+        </td>
+        <td>
+          {% if s.min_humidity_pct is not none and s.max_humidity_pct is not none %}
+            {{ "%.1f"|format(s.min_humidity_pct) }} / {{ "%.1f"|format(s.max_humidity_pct) }}
+          {% else %}-{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Hive Thermostats</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Thermostat</th><th>Zone</th><th>Timestamp</th><th>Current Temp (C)</th>
+        <th>Target Temp (C)</th><th>Mode</th><th>Status</th><th>Daily Runtime (HH:MM)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for h in hive %}
+      <tr>
+        <td>{{ h.friendly_name or h.ieee_address }}</td>
+        <td>{{ h.zone or "-" }}</td>
+        <td>{{ h.timestamp }}</td>
+        <td>{% if h.temperature_c is not none %}{{ "%.1f"|format(h.temperature_c) }}{% else %}-{% endif %}</td>
+        <td>{% if h.target_temp_c is not none %}{{ "%.1f"|format(h.target_temp_c) }}{% else %}-{% endif %}</td>
+        <td>{{ h.heating_mode or "-" }}</td>
+        <td class="status-{{ h.status }}">{{ h.status }}</td>
+        <td>{{ h.runtime_today_hhmm }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Shelly Blu H&amp;T</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Sensor</th><th>Zone</th><th>Timestamp</th><th>Temp (C)</th><th>Humidity (%)</th><th>Battery (%)</th>
+        <th>Daily Low/High Temp (C)</th><th>Daily Low/High Humidity (%)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in shelly %}
+      <tr>
+        <td>{{ s.friendly_name or s.ieee_address }}</td>
+        <td>{{ s.zone or "-" }}</td>
+        <td>{{ s.timestamp }}</td>
+        <td>{% if s.temperature_c is not none %}{{ "%.1f"|format(s.temperature_c) }}{% else %}-{% endif %}</td>
+        <td>{% if s.humidity_pct is not none %}{{ "%.1f"|format(s.humidity_pct) }}{% else %}-{% endif %}</td>
+        <td>{% if s.battery_pct is not none %}{{ "%.0f"|format(s.battery_pct) }}{% else %}-{% endif %}</td>
+        <td>
+          {% if s.min_temp_c is not none and s.max_temp_c is not none %}
+            {{ "%.1f"|format(s.min_temp_c) }} / {{ "%.1f"|format(s.max_temp_c) }}
+          {% else %}-{% endif %}
+        </td>
+        <td>
+          {% if s.min_humidity_pct is not none and s.max_humidity_pct is not none %}
+            {{ "%.1f"|format(s.min_humidity_pct) }} / {{ "%.1f"|format(s.max_humidity_pct) }}
+          {% else %}-{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>
+"""
+    return render_template_string(html, **snapshot)
 
 
 @app.route("/api/sensors")
@@ -225,7 +504,9 @@ def run_server(host: str = "0.0.0.0", port: int = 8080) -> None:
     print(f"  Sensor Data API running on http://{host}:{port}")
     print(f"{'='*50}")
     print(f"\nEndpoints:")
+    print(f"  GET /dashboard           - Live sensor dashboard")
     print(f"  GET /api/status          - System overview")
+    print(f"  GET /api/dashboard       - Dashboard JSON data")
     print(f"  GET /api/sensors         - All sensors")
     print(f"  GET /api/readings        - Readings (filterable)")
     print(f"  GET /api/readings/latest - Latest per sensor")
