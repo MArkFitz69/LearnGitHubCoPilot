@@ -89,7 +89,7 @@ def upsert_sensor(
     zone: str | None = None,
 ) -> None:
     """Insert or update a sensor in the registry."""
-    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     conn.execute(
         """
         INSERT INTO sensors (ieee_address, friendly_name, model, zone, first_seen, last_seen)
@@ -119,7 +119,7 @@ def insert_reading(
     heating_mode: str | None = None,
 ) -> None:
     """Store a single sensor reading."""
-    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     heating_int = int(heating_on) if heating_on is not None else None
     boost_int = int(boost_on) if boost_on is not None else None
     conn.execute(
