@@ -32,7 +32,7 @@ from datetime import datetime
 
 from flask import Flask, Response, jsonify, render_template_string, request
 
-from .config import DATABASE_PATH
+from .config import DATABASE_PATH, SHELLY_SENSORS
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,17 @@ def _format_duration_hhmm(seconds: float) -> str:
     hours = total_seconds // 3600
     minutes = (total_seconds % 3600) // 60
     return f"{hours:02d}:{minutes:02d}"
+
+
+def _zone_sort_key(zone: str | None) -> tuple[int, str]:
+    """Sort zones naturally (Zone 1, Zone 2, ...)."""
+    if not zone:
+        return (999, "")
+    if zone.lower().startswith("zone "):
+        suffix = zone[5:].strip()
+        if suffix.isdigit():
+            return (int(suffix), zone)
+    return (999, zone)
 
 
 def _calculate_hive_runtime_seconds(conn: sqlite3.Connection, day: str) -> dict[str, float]:
@@ -146,6 +157,11 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
         ieee_address = row["ieee_address"]
         model = row["model"] or ""
         latest = dict(row)
+        if ieee_address.startswith("shelly:"):
+            mac = ieee_address.split("shelly:", 1)[1].upper()
+            configured_name = SHELLY_SENSORS.get(mac)
+            if configured_name:
+                latest["friendly_name"] = configured_name
         daily = daily_by_sensor.get(ieee_address, {})
 
         if ieee_address.startswith("hive:"):
@@ -178,10 +194,14 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
             "max_humidity_pct": daily.get("max_humidity_pct"),
         }
 
-        if model == "SNZB-02DR2":
+        if model.startswith("SNZB-02"):
             sonoff.append(sensor_row)
         elif ieee_address.startswith("shelly:") or model == "Shelly Blu H&T":
             shelly.append(sensor_row)
+
+    sonoff.sort(key=lambda row: (_zone_sort_key(row.get("zone")), row.get("friendly_name") or row.get("ieee_address")))
+    hive.sort(key=lambda row: (_zone_sort_key(row.get("zone")), row.get("friendly_name") or row.get("ieee_address")))
+    shelly.sort(key=lambda row: (_zone_sort_key(row.get("zone")), row.get("friendly_name") or row.get("ieee_address")))
 
     return {
         "date_utc": today_utc,
@@ -253,7 +273,7 @@ def dashboard():
   <h1>Home Sensor Dashboard</h1>
   <div class="meta">Generated (UTC): {{ generated_at_utc }} | Auto-refresh: 60s</div>
 
-  <h2>Sonoff Sensors (SNZB-02DR2)</h2>
+  <h2>Sonoff Sensors (SNZB-02D / SNZB-02DR2)</h2>
   <table>
     <thead>
       <tr>
