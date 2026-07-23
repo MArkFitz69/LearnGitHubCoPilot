@@ -135,21 +135,6 @@ class ZigbeeSensorListener:
                             cluster_id,
                         )
 
-
-class _ClusterListener:
-    """Lightweight listener attached to a single cluster, forwarding to the main handler."""
-
-    def __init__(self, parent: "ZigbeeSensorListener", cluster):
-        self.parent = parent
-        self.cluster = cluster
-
-    def attribute_updated(self, attrid, value, *args):
-        """Called by zigpy when this cluster receives an attribute report."""
-        self.parent._handle_attribute(self.cluster, attrid, value)
-
-    def cluster_command(self, *args, **kwargs):
-        pass
-
     async def stop(self) -> None:
         """Shut down the Zigbee coordinator cleanly."""
         if self.app:
@@ -166,6 +151,21 @@ class _ClusterListener:
         if self.app:
             await self.app.permit(duration)
             logger.info("Network open for joining (%d seconds).", duration)
+
+
+class _ClusterListener:
+    """Lightweight listener attached to a single cluster, forwarding to the main handler."""
+
+    def __init__(self, parent: "ZigbeeSensorListener", cluster):
+        self.parent = parent
+        self.cluster = cluster
+
+    def attribute_updated(self, attrid, value, *args):
+        """Called by zigpy when this cluster receives an attribute report."""
+        self.parent._handle_attribute(self.cluster, attrid, value)
+
+    def cluster_command(self, *args, **kwargs):
+        pass
 
     # ── zigpy listener callbacks ──────────────────────────────────────
 
