@@ -94,7 +94,7 @@ ZONES: dict[str, str] = {
 # Shelly Blu H&T sensors (keyed by BLE MAC address, uppercase with colons)
 # Run `python -m zigbee_sensor_reader --discover-shelly` to find MAC addresses
 SHELLY_SENSORS: dict[str, str] = {
-    "94:B2:16:08:82:98": "Outside",
+    "94:B2:16:08:82:98": "Attic",
 }
 
 # BLE scan duration for Shelly sensors (seconds)

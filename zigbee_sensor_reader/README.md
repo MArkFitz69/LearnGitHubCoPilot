@@ -70,7 +70,7 @@ This will scan for 30 seconds and print the MAC address. Add it to `config.py`:
 
 ```python
 SHELLY_SENSORS = {
-    "AA:BB:CC:DD:EE:FF": "Outside",
+    "AA:BB:CC:DD:EE:FF": "Attic",
 }
 ```
 
@@ -142,7 +142,9 @@ Available endpoints:
 
 | Endpoint | Description |
 |----------|-------------|
+| `/dashboard` | Live web dashboard (Sonoff, Hive, Shelly with daily stats) |
 | `/api/status` | System overview (sensor count, latest reading) |
+| `/api/dashboard` | Dashboard data as JSON (daily min/max + Hive runtime) |
 | `/api/sensors` | All registered sensors with zones |
 | `/api/readings?format=csv` | All readings as CSV |
 | `/api/readings?zone=Zone 1&format=csv` | Filter by zone |
@@ -191,4 +193,3 @@ zigbee_sensor_reader/
 ├── zigbee-sensor-reader.service  # systemd: data collector
 └── sensor-data-api.service       # systemd: web API server
 ```
-
