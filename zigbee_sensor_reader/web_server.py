@@ -259,6 +259,7 @@ def _get_system_info() -> dict:
 
 
 
+def _calculate_hive_runtime_seconds(conn: sqlite3.Connection, day: str) -> dict:
     """
     Calculate today's runtime in seconds for each Hive thermostat.
 
