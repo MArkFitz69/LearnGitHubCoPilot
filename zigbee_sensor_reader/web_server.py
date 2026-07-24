@@ -996,12 +996,12 @@ async function refreshStatus() {
   _setText("candidateIeee", data.state.candidate_ieee || "-");
   _setText("candidateModel", data.state.candidate_model || "-");
   _setText("candidateJoined", data.state.candidate_joined_at || "-");
+  if (data.state.candidate_ieee) {
+    document.getElementById("ieeeAddress").value = data.state.candidate_ieee;
+  }
 
   if (data.first_reading && data.first_reading.timestamp) {
     _setText("firstReading", `${data.first_reading.timestamp} temp=${data.first_reading.temperature_c ?? "-"} humidity=${data.first_reading.humidity_pct ?? "-"} battery=${data.first_reading.battery_pct ?? "-"}`);
-    if (!document.getElementById("ieeeAddress").value) {
-      document.getElementById("ieeeAddress").value = data.state.candidate_ieee || "";
-    }
   } else if (data.first_reading_waiting) {
     _setText("firstReading", `Waiting (deadline ${data.first_reading_deadline || "-"})`);
   } else {
