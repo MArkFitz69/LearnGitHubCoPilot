@@ -307,7 +307,7 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
     """Build a dashboard snapshot for API and HTML rendering."""
     latest_rows = conn.execute(
         """
-        SELECT r.ieee_address, s.friendly_name, s.model, r.timestamp,
+        SELECT r.ieee_address, s.friendly_name, s.model, r.timestamp, r.reading_date, r.reading_time,
                r.temperature_c, r.humidity_pct, r.battery_pct, r.zone,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
                r.device_min_temp_c, r.device_max_temp_c,
@@ -827,7 +827,7 @@ def api_readings():
     output_format = request.args.get("format", "json")
 
     query = """
-        SELECT r.ieee_address, s.friendly_name, r.timestamp,
+        SELECT r.ieee_address, s.friendly_name, r.timestamp, r.reading_date, r.reading_time,
                r.temperature_c, r.humidity_pct, r.battery_pct, r.battery_voltage_mv,
                r.link_quality, r.rssi, r.zone,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
@@ -870,7 +870,7 @@ def api_readings_latest():
     """Get the most recent reading for each sensor."""
     conn = get_db()
     rows = conn.execute("""
-        SELECT r.ieee_address, s.friendly_name, r.timestamp,
+        SELECT r.ieee_address, s.friendly_name, r.timestamp, r.reading_date, r.reading_time,
                r.temperature_c, r.humidity_pct, r.battery_pct, r.battery_voltage_mv,
                r.link_quality, r.rssi, r.zone,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
@@ -902,7 +902,7 @@ def api_export_csv():
     zone = request.args.get("zone")
 
     query = """
-        SELECT r.ieee_address, s.friendly_name, r.timestamp,
+        SELECT r.ieee_address, s.friendly_name, r.timestamp, r.reading_date, r.reading_time,
                r.temperature_c, r.humidity_pct, r.battery_pct, r.battery_voltage_mv,
                r.link_quality, r.rssi, r.zone,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,

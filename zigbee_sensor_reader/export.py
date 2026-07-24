@@ -45,6 +45,8 @@ def export_to_csv(
     query = """
         SELECT
             r.timestamp,
+            r.reading_date,
+            r.reading_time,
             r.ieee_address,
             COALESCE(s.friendly_name, r.ieee_address) AS sensor_name,
             s.model,
@@ -76,12 +78,14 @@ def export_to_csv(
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
-            "Timestamp", "IEEE Address", "Sensor Name", "Model",
+            "Timestamp", "Reading Date", "Reading Time", "IEEE Address", "Sensor Name", "Model",
             "Temperature (°C)", "Humidity (%)", "Battery (%)", "Link Quality",
         ])
         for row in rows:
             writer.writerow([
                 row["timestamp"],
+                row["reading_date"],
+                row["reading_time"],
                 row["ieee_address"],
                 row["sensor_name"],
                 row["model"],
@@ -133,7 +137,7 @@ def export_to_excel(
     ws_all = wb.active
     ws_all.title = "All Sensors"
     headers = [
-        "Timestamp", "Sensor Name", "Temperature (°C)",
+        "Timestamp", "Reading Date", "Reading Time", "Sensor Name", "Temperature (°C)",
         "Humidity (%)", "Battery (%)", "Link Quality",
     ]
     ws_all.append(headers)
@@ -141,6 +145,8 @@ def export_to_excel(
     query = """
         SELECT
             r.timestamp,
+            r.reading_date,
+            r.reading_time,
             COALESCE(s.friendly_name, r.ieee_address) AS sensor_name,
             r.temperature_c,
             r.humidity_pct,
@@ -165,7 +171,7 @@ def export_to_excel(
     rows = conn.execute(query, params).fetchall()
     for row in rows:
         ws_all.append([
-            row["timestamp"], row["sensor_name"], row["temperature_c"],
+            row["timestamp"], row["reading_date"], row["reading_time"], row["sensor_name"], row["temperature_c"],
             row["humidity_pct"], row["battery_pct"], row["link_quality"],
         ])
 
@@ -175,10 +181,10 @@ def export_to_excel(
         name = sensor["friendly_name"] or ieee
         sheet_name = name[:31]  # Sheet names max 31 chars
         ws = wb.create_sheet(title=sheet_name)
-        ws.append(["Timestamp", "Temperature (°C)", "Humidity (%)", "Battery (%)", "Link Quality"])
+        ws.append(["Timestamp", "Reading Date", "Reading Time", "Temperature (°C)", "Humidity (%)", "Battery (%)", "Link Quality"])
 
         sensor_query = """
-            SELECT timestamp, temperature_c, humidity_pct, battery_pct, link_quality
+            SELECT timestamp, reading_date, reading_time, temperature_c, humidity_pct, battery_pct, link_quality
             FROM readings
             WHERE ieee_address = ?
         """
@@ -193,7 +199,7 @@ def export_to_excel(
 
         for row in conn.execute(sensor_query, sensor_params):
             ws.append([
-                row["timestamp"], row["temperature_c"],
+                row["timestamp"], row["reading_date"], row["reading_time"], row["temperature_c"],
                 row["humidity_pct"], row["battery_pct"], row["link_quality"],
             ])
 
