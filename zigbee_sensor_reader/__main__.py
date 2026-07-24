@@ -47,6 +47,9 @@ def handle_reading(reading, conn) -> None:
         zone=zone,
         device_min_temp_c=getattr(reading, "device_min_temp_c", None),
         device_max_temp_c=getattr(reading, "device_max_temp_c", None),
+        device_min_humidity_pct=getattr(reading, "device_min_humidity_pct", None),
+        device_max_humidity_pct=getattr(reading, "device_max_humidity_pct", None),
+        battery_voltage_mv=getattr(reading, "battery_voltage_mv", None),
     )
 
     parts = [f"[{reading.friendly_name}]"]
@@ -58,6 +61,9 @@ def handle_reading(reading, conn) -> None:
         parts.append(f"Humidity: {reading.humidity_pct:.1f}%")
     if reading.battery_pct is not None:
         parts.append(f"Battery: {reading.battery_pct:.0f}%")
+    bv = getattr(reading, "battery_voltage_mv", None)
+    if bv is not None:
+        parts.append(f"V: {bv/1000:.2f}V")
     dmin = getattr(reading, "device_min_temp_c", None)
     dmax = getattr(reading, "device_max_temp_c", None)
     if dmin is not None and dmax is not None:

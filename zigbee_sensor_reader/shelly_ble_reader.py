@@ -215,6 +215,8 @@ async def poll_shelly_ble(scan_duration: float = 60.0) -> list[dict]:
             humidity_pct=data.get("humidity"),
             battery_pct=data.get("battery"),
             zone=zone,
+            battery_voltage_mv=data.get("voltage") * 1000 if data.get("voltage") is not None else None,
+            rssi=data.get("rssi"),
         )
 
         stored.append(data)
