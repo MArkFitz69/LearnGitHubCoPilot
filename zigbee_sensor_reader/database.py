@@ -72,6 +72,8 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         ("readings", "boost_on", "INTEGER"),
         ("readings", "target_temp_c", "REAL"),
         ("readings", "heating_mode", "TEXT"),
+        ("readings", "device_min_temp_c", "REAL"),
+        ("readings", "device_max_temp_c", "REAL"),
     ]
     for table, col, col_type in migrations:
         try:
@@ -117,6 +119,8 @@ def insert_reading(
     boost_on: bool | None = None,
     target_temp_c: float | None = None,
     heating_mode: str | None = None,
+    device_min_temp_c: float | None = None,
+    device_max_temp_c: float | None = None,
 ) -> None:
     """Store a single sensor reading."""
     now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -125,11 +129,13 @@ def insert_reading(
     conn.execute(
         """
         INSERT INTO readings (ieee_address, timestamp, temperature_c, humidity_pct,
-            battery_pct, link_quality, zone, heating_on, boost_on, target_temp_c, heating_mode)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            battery_pct, link_quality, zone, heating_on, boost_on, target_temp_c,
+            heating_mode, device_min_temp_c, device_max_temp_c)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (ieee_address, now, temperature_c, humidity_pct, battery_pct, link_quality,
-         zone, heating_int, boost_int, target_temp_c, heating_mode),
+         zone, heating_int, boost_int, target_temp_c, heating_mode,
+         device_min_temp_c, device_max_temp_c),
     )
     # Also touch the sensor's last_seen
     conn.execute(

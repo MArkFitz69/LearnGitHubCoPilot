@@ -120,7 +120,8 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
         """
         SELECT r.ieee_address, s.friendly_name, s.model, r.timestamp,
                r.temperature_c, r.humidity_pct, r.battery_pct, r.zone,
-               r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode
+               r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
+               r.device_min_temp_c, r.device_max_temp_c
         FROM readings r
         INNER JOIN (
             SELECT ieee_address, MAX(timestamp) AS max_ts
@@ -188,10 +189,14 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
 
         sensor_row = {
             **latest,
+            # DB-computed daily min/max (from all readings today)
             "min_temp_c": daily.get("min_temp_c"),
             "max_temp_c": daily.get("max_temp_c"),
             "min_humidity_pct": daily.get("min_humidity_pct"),
             "max_humidity_pct": daily.get("max_humidity_pct"),
+            # Device-reported daily min/max (from ZCL attributes 0x0001/0x0002)
+            "device_min_temp_c": latest.get("device_min_temp_c"),
+            "device_max_temp_c": latest.get("device_max_temp_c"),
         }
 
         if model.startswith("SNZB-02"):
@@ -280,8 +285,8 @@ def dashboard():
   <table>
     <thead>
       <tr>
-        <th>Sensor</th><th>Zone</th><th>Timestamp</th><th>Temp (C)</th><th>Humidity (%)</th>
-        <th>Daily Low/High Temp (C)</th><th>Daily Low/High Humidity (%)</th>
+        <th>Sensor</th><th>Zone</th><th>Timestamp</th><th>Temp (°C)</th><th>Humidity (%)</th>
+        <th>Device Min/Max Temp (°C)</th><th>Today Low/High Temp (°C)</th><th>Today Low/High Humidity (%)</th>
       </tr>
     </thead>
     <tbody>
@@ -292,6 +297,11 @@ def dashboard():
         <td>{{ s.timestamp }}</td>
         <td>{% if s.temperature_c is not none %}{{ "%.1f"|format(s.temperature_c) }}{% else %}-{% endif %}</td>
         <td>{% if s.humidity_pct is not none %}{{ "%.1f"|format(s.humidity_pct) }}{% else %}-{% endif %}</td>
+        <td>
+          {% if s.device_min_temp_c is not none and s.device_max_temp_c is not none %}
+            {{ "%.1f"|format(s.device_min_temp_c) }} / {{ "%.1f"|format(s.device_max_temp_c) }}
+          {% else %}-{% endif %}
+        </td>
         <td>
           {% if s.min_temp_c is not none and s.max_temp_c is not none %}
             {{ "%.1f"|format(s.min_temp_c) }} / {{ "%.1f"|format(s.max_temp_c) }}
