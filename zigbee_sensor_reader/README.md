@@ -17,6 +17,7 @@ Python application to monitor home temperature and humidity for heating analysis
 - 📡 Captures Shelly Blu H&T outdoor sensor via Bluetooth
 - 🏠 Heating zone mapping (Zone 1/2/3) for each sensor and thermostat
 - 🌐 Web API server for remote data access from Power BI
+- ➕ Secure web onboarding flow for adding one Zigbee sensor at a time
 - 💾 SQLite database with automatic schema migrations
 - 📊 CSV and Excel export with per-sensor sheets
 
@@ -80,8 +81,12 @@ SHELLY_SENSORS = {
 sudo cp zigbee_sensor_reader/zigbee-sensor-reader.service /etc/systemd/system/
 sudo cp zigbee_sensor_reader/sensor-data-api.service /etc/systemd/system/
 
-# Edit credentials in the service file
+# Edit credentials/env vars in service files
 sudo systemctl edit zigbee-sensor-reader
+sudo systemctl edit sensor-data-api
+
+# In sensor-data-api override, set:
+# Environment=ONBOARDING_PASSCODE=your-strong-passcode
 
 # Enable and start
 sudo systemctl enable --now zigbee-sensor-reader
@@ -120,6 +125,8 @@ python -m zigbee_sensor_reader --serve --port 8080
 python -m zigbee_sensor_reader --pair
 ```
 
+Or use the web onboarding page: `http://<pi-ip>:8080/onboarding`
+
 ### Export data
 
 ```bash
@@ -143,6 +150,8 @@ Available endpoints:
 | Endpoint | Description |
 |----------|-------------|
 | `/dashboard` | Live web dashboard (Sonoff, Hive, Shelly with daily stats) |
+| `/onboarding` | Guided one-sensor onboarding page (passcode protected) |
+| `/system` | Pi and application status page |
 | `/api/status` | System overview (sensor count, latest reading) |
 | `/api/dashboard` | Dashboard data as JSON (daily min/max + Hive runtime) |
 | `/api/sensors` | All registered sensors with zones |
@@ -151,6 +160,22 @@ Available endpoints:
 | `/api/readings?start=2026-01-01&end=2026-03-31&format=csv` | Filter by date |
 | `/api/readings/latest?format=csv` | Latest reading per sensor |
 | `/api/export/csv` | Download full CSV file |
+
+Onboarding-specific endpoints:
+- `POST /api/onboarding/auth`
+- `POST /api/onboarding/temp-passcode`
+- `POST /api/onboarding/start-pairing`
+- `POST /api/onboarding/save-sensor`
+- `GET /api/onboarding/status`
+
+## Web onboarding flow
+
+1. Open `/onboarding` and unlock with `ONBOARDING_PASSCODE`.
+2. (Optional) Generate a temporary 15-minute sharing passcode.
+3. Start a 120-second pairing window.
+4. Put one sensor into pairing mode.
+5. Confirm candidate IEEE/model and first reading (up to 5 minutes).
+6. Save friendly name + zone (writes to DB and `config.py`).
 
 ### Option 2: Export files
 

@@ -9,6 +9,8 @@ WorkingDirectory=/home/admin/LearnGitHubCoPilot
 ExecStart=/home/admin/LearnGitHubCoPilot/.venv/bin/python -m zigbee_sensor_reader --serve --port 8080
 Restart=always
 RestartSec=10
+# Required for /onboarding passcode actions
+Environment=ONBOARDING_PASSCODE=change-this-passcode
 
 [Install]
 WantedBy=multi-user.target

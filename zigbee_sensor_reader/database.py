@@ -64,6 +64,42 @@ def _create_tables(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_readings_zone
             ON readings (zone);
+
+        CREATE TABLE IF NOT EXISTS onboarding_state (
+            id                INTEGER PRIMARY KEY CHECK (id = 1),
+            pairing_active    INTEGER NOT NULL DEFAULT 0,
+            pairing_started_at TEXT,
+            pairing_ends_at   TEXT,
+            candidate_ieee    TEXT,
+            candidate_model   TEXT,
+            candidate_joined_at TEXT,
+            first_reading_at  TEXT,
+            metadata_saved    INTEGER NOT NULL DEFAULT 0,
+            tcp_precheck_ok   INTEGER,
+            tcp_postcheck_ok  INTEGER,
+            last_error        TEXT,
+            updated_at        TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS onboarding_commands (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            command       TEXT NOT NULL,
+            payload       TEXT,
+            status        TEXT NOT NULL DEFAULT 'pending',
+            created_at    TEXT NOT NULL,
+            processed_at  TEXT,
+            error         TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_onboarding_commands_status
+            ON onboarding_commands (status, id);
+
+        CREATE TABLE IF NOT EXISTS onboarding_temp_codes (
+            code_hash     TEXT PRIMARY KEY,
+            created_at    TEXT NOT NULL,
+            expires_at    TEXT NOT NULL,
+            revoked_at    TEXT
+        );
         """
     )
     # Add columns to existing databases (safe to run multiple times)
@@ -97,6 +133,15 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             reading_time = COALESCE(reading_time, substr(timestamp, 12, 8))
         WHERE reading_date IS NULL OR reading_time IS NULL
         """
+    )
+
+    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO onboarding_state (id, updated_at)
+        VALUES (1, ?)
+        """,
+        (now,),
     )
     conn.commit()
 
