@@ -309,7 +309,9 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
         SELECT r.ieee_address, s.friendly_name, s.model, r.timestamp,
                r.temperature_c, r.humidity_pct, r.battery_pct, r.zone,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
-               r.device_min_temp_c, r.device_max_temp_c
+               r.device_min_temp_c, r.device_max_temp_c,
+               r.device_min_humidity_pct, r.device_max_humidity_pct,
+               r.battery_voltage_mv, r.rssi
         FROM readings r
         INNER JOIN (
             SELECT ieee_address, MAX(timestamp) AS max_ts
@@ -676,8 +678,8 @@ def dashboard():
   <table>
     <thead>
       <tr>
-        <th>Sensor</th><th>Zone</th><th>Timestamp</th><th>Temp (Â°C)</th><th>Humidity (%)</th>
-        <th>Device Min/Max Temp (Â°C)</th><th>Today Low/High Temp (Â°C)</th><th>Today Low/High Humidity (%)</th>
+        <th>Sensor</th><th>Zone</th><th>Timestamp</th><th>Temp (&deg;C)</th><th>Humidity (%)</th>
+        <th>Device Min/Max Temp (&deg;C)</th><th>Today Low/High Temp (&deg;C)</th><th>Today Low/High Humidity (%)</th>
       </tr>
     </thead>
     <tbody>
@@ -712,8 +714,8 @@ def dashboard():
   <table>
     <thead>
       <tr>
-        <th>Thermostat</th><th>Zone</th><th>Timestamp</th><th>Current Temp (Â°C)</th>
-        <th>Target Temp (Â°C)</th><th>Mode</th><th>Status</th><th>Daily Runtime (HH:MM)</th>
+        <th>Thermostat</th><th>Zone</th><th>Timestamp</th><th>Current Temp (&deg;C)</th>
+        <th>Target Temp (&deg;C)</th><th>Mode</th><th>Status</th><th>Daily Runtime (HH:MM)</th>
       </tr>
     </thead>
     <tbody>
@@ -759,9 +761,9 @@ def dashboard():
   <table>
     <thead>
       <tr>
-        <th>Sensor</th><th>Zone</th><th>Timestamp</th><th>Temp (Â°C)</th><th>Humidity (%)</th>
+        <th>Sensor</th><th>Zone</th><th>Timestamp</th><th>Temp (&deg;C)</th><th>Humidity (%)</th>
         <th>Battery (%)</th><th>Voltage (V)</th><th>RSSI</th>
-        <th>Today Low/High Temp (Â°C)</th><th>Today Low/High Humidity (%)</th>
+        <th>Today Low/High Temp (&deg;C)</th><th>Today Low/High Humidity (%)</th>
       </tr>
     </thead>
     <tbody>
