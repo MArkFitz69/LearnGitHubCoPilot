@@ -24,12 +24,13 @@ HIVE_USERNAME = os.environ.get("HIVE_USERNAME", "")
 HIVE_PASSWORD = os.environ.get("HIVE_PASSWORD", "")
 
 
-async def fetch_hive_data() -> list[dict]:
+async def fetch_hive_data() -> dict:
     """
-    Connect to the Hive API and fetch thermostat data.
+    Connect to the Hive API and fetch thermostat + hot water data.
 
-    Returns a list of dicts with keys:
-        name, device_id, temperature_c, target_temp_c, mode, battery_pct
+    Returns a dict with keys:
+        "heating": list of heating dicts
+        "hotwater": list of hot water dicts
     """
     from apyhiveapi import Hive
 
@@ -38,7 +39,7 @@ async def fetch_hive_data() -> list[dict]:
             "Hive credentials not set. Set HIVE_USERNAME and HIVE_PASSWORD "
             "environment variables."
         )
-        return []
+        return {"heating": [], "hotwater": []}
 
     try:
         # Login and start session
@@ -51,31 +52,26 @@ async def fetch_hive_data() -> list[dict]:
                 "Hive account requires SMS 2FA. This is not supported in "
                 "unattended mode. Disable 2FA or use an app-specific password."
             )
-            return []
+            return {"heating": [], "hotwater": []}
 
         session = await hive.startSession()
 
-        results = []
+        heating_results = []
+        hotwater_results = []
 
-        # Iterate over climate (thermostat) devices
+        # ── Heating thermostats ─────────────────────────────────────────────
         for dev in session.get("climate", []):
             hive_name = dev.get("hiveName", "Unknown")
             device_id = dev.get("hiveID", dev.get("device_id", "unknown"))
-            # Use friendly name from config, fall back to Hive's name
             friendly_name = HIVE_NAMES.get(hive_name, hive_name)
 
             try:
-                # Get current and target temperature via the heating helper
                 temp = await hive.heating.getCurrentTemperature(dev)
                 target = await hive.heating.getTargetTemperature(dev)
                 mode = await hive.heating.getMode(dev)
                 state = await hive.heating.getState(dev)
                 boost = await hive.heating.getBoostStatus(dev)
-
-                # Battery from deviceData
                 battery = dev.get("deviceData", {}).get("battery")
-
-                # Heating is on if state is not OFF
                 heating_on = state not in ("OFF", None, False)
 
                 heating_data = {
@@ -89,11 +85,10 @@ async def fetch_hive_data() -> list[dict]:
                     "battery_pct": battery,
                     "zone": ZONES.get(hive_name),
                 }
-
-                results.append(heating_data)
+                heating_results.append(heating_data)
                 heat_status = "HEATING" if heating_on else "off"
                 logger.info(
-                    "Hive %s: %.1f°C (target: %.1f°C, mode: %s, heating: %s)",
+                    "Hive heating %s: %.1f°C (target: %.1f°C, mode: %s, heating: %s)",
                     friendly_name,
                     heating_data["temperature_c"] or 0,
                     heating_data["target_temp_c"] or 0,
@@ -101,20 +96,57 @@ async def fetch_hive_data() -> list[dict]:
                     heat_status,
                 )
             except Exception as e:
-                logger.warning("Failed to read Hive device %s: %s", friendly_name, e)
+                logger.warning("Failed to read Hive heating %s: %s", friendly_name, e)
 
-        return results
+        # ── Hot water ───────────────────────────────────────────────────────
+        # Try both common key names across library versions
+        hw_devices = (
+            session.get("water_heater")
+            or session.get("hotwater")
+            or getattr(hive, "device_list", {}).get("water_heater")
+            or []
+        )
+        for dev in hw_devices:
+            hive_name = dev.get("hiveName", dev.get("hive_name", "Hot Water"))
+            device_id = dev.get("hiveID", dev.get("device_id", "hotwater"))
+            friendly_name = HIVE_NAMES.get(hive_name, hive_name)
+
+            try:
+                mode = await hive.hotwater.get_mode(dev)
+                state = await hive.hotwater.get_state(dev)
+                boost = await hive.hotwater.get_boost_status(dev)
+
+                hw_on = state not in ("OFF", None, False)
+                boost_active = boost not in ("OFF", None, False)
+
+                hw_data = {
+                    "name": friendly_name,
+                    "device_id": device_id,
+                    "hw_on": hw_on,
+                    "mode": mode,
+                    "boost": boost_active,
+                    "zone": ZONES.get(hive_name),
+                }
+                hotwater_results.append(hw_data)
+                logger.info(
+                    "Hive hot water %s: state=%s, mode=%s, boost=%s",
+                    friendly_name, "ON" if hw_on else "OFF", mode, boost,
+                )
+            except Exception as e:
+                logger.warning("Failed to read Hive hot water %s: %s", friendly_name, e)
+
+        return {"heating": heating_results, "hotwater": hotwater_results}
 
     except Exception as e:
         logger.error("Hive API error: %s", e)
-        return []
+        return {"heating": [], "hotwater": []}
 
 
-def store_hive_readings(readings: list[dict]) -> None:
-    """Store Hive thermostat readings in the same SQLite database."""
+def store_hive_readings(data: dict) -> None:
+    """Store Hive heating + hot water readings in SQLite."""
     conn = get_connection()
 
-    for reading in readings:
+    for reading in data.get("heating", []):
         # Use "hive:" prefix to distinguish from Zigbee sensors
         ieee_address = f"hive:{reading['device_id']}"
         friendly_name = f"Hive {reading['name']}"
@@ -141,17 +173,42 @@ def store_hive_readings(readings: list[dict]) -> None:
             heating_mode=reading.get("mode"),
         )
 
+    for hw in data.get("hotwater", []):
+        # "hive-hw:" prefix distinguishes hot water from heating thermostats
+        ieee_address = f"hive-hw:{hw['device_id']}"
+        friendly_name = f"Hive Hot Water"
+        zone = hw.get("zone")
+
+        upsert_sensor(
+            conn,
+            ieee_address=ieee_address,
+            friendly_name=friendly_name,
+            model="Hive Hot Water",
+            zone=zone,
+        )
+
+        insert_reading(
+            conn,
+            ieee_address=ieee_address,
+            temperature_c=None,  # hot water cylinder has no temp sensor
+            humidity_pct=None,
+            zone=zone,
+            heating_on=hw.get("hw_on"),    # True when actively heating water
+            boost_on=hw.get("boost"),
+            heating_mode=hw.get("mode"),   # SCHEDULE / ON / OFF / BOOST
+        )
+
     conn.close()
 
 
-async def poll_hive() -> list[dict]:
-    """Fetch and store Hive thermostat data."""
-    readings = await fetch_hive_data()
-    if readings:
-        store_hive_readings(readings)
-    return readings
+async def poll_hive() -> dict:
+    """Fetch and store Hive heating + hot water data."""
+    data = await fetch_hive_data()
+    if data["heating"] or data["hotwater"]:
+        store_hive_readings(data)
+    return data
 
 
-def run_hive_poll() -> list[dict]:
+def run_hive_poll() -> dict:
     """Synchronous wrapper for poll_hive."""
     return asyncio.run(poll_hive())

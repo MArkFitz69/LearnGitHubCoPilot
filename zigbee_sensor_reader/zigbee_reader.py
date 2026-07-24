@@ -39,6 +39,9 @@ class SensorReading:
         link_quality: int | None = None,
         device_min_temp_c: float | None = None,
         device_max_temp_c: float | None = None,
+        device_min_humidity_pct: float | None = None,
+        device_max_humidity_pct: float | None = None,
+        battery_voltage_mv: float | None = None,
     ):
         self.ieee_address = ieee_address
         self.friendly_name = friendly_name
@@ -49,6 +52,9 @@ class SensorReading:
         self.link_quality = link_quality
         self.device_min_temp_c = device_min_temp_c
         self.device_max_temp_c = device_max_temp_c
+        self.device_min_humidity_pct = device_min_humidity_pct
+        self.device_max_humidity_pct = device_max_humidity_pct
+        self.battery_voltage_mv = battery_voltage_mv
 
     def __repr__(self) -> str:
         return (
@@ -310,15 +316,18 @@ def read_cached_sensors(app: ControllerApplication) -> list[SensorReading]:
             temp = None
             humidity = None
             battery = None
+            battery_voltage = None
             device_min_temp = None
             device_max_temp = None
+            device_min_humidity = None
+            device_max_humidity = None
 
             if TemperatureMeasurement.cluster_id in endpoint.in_clusters:
                 cluster = endpoint.in_clusters[TemperatureMeasurement.cluster_id]
                 val = cluster.get(0x0000)  # measured_value
                 if val is not None:
                     temp = val / 100.0
-                # 0x0001 = min_measured_value, 0x0002 = max_measured_value
+                # 0x0001/0x0002 = min/max_measured_value
                 # On SNZB-02DR2 these hold the device's rolling daily min/max
                 min_val = cluster.get(0x0001)
                 max_val = cluster.get(0x0002)
@@ -332,12 +341,25 @@ def read_cached_sensors(app: ControllerApplication) -> list[SensorReading]:
                 val = cluster.get(0x0000)
                 if val is not None:
                     humidity = val / 100.0
+                # 0x0001/0x0002 = min/max measured humidity (if supported)
+                min_val = cluster.get(0x0001)
+                max_val = cluster.get(0x0002)
+                if min_val is not None and min_val != 0xFFFF:
+                    device_min_humidity = min_val / 100.0
+                if max_val is not None and max_val != 0xFFFF:
+                    device_max_humidity = max_val / 100.0
 
             if PowerConfiguration.cluster_id in endpoint.in_clusters:
                 cluster = endpoint.in_clusters[PowerConfiguration.cluster_id]
-                val = cluster.get(0x0021)  # battery_percentage_remaining
+                val = cluster.get(0x0021)  # battery_percentage_remaining (0-200 → %)
                 if val is not None:
                     battery = val / 2.0
+                volt_val = cluster.get(0x0020)  # battery_voltage (units: 100 mV)
+                if volt_val is not None:
+                    battery_voltage = volt_val * 100.0  # store as mV
+
+            # LQI from device neighbour table (best-effort; may be None)
+            lqi = getattr(device, "lqi", None)
 
             if temp is not None or humidity is not None:
                 readings.append(SensorReading(
@@ -347,8 +369,12 @@ def read_cached_sensors(app: ControllerApplication) -> list[SensorReading]:
                     temperature_c=temp,
                     humidity_pct=humidity,
                     battery_pct=battery,
+                    link_quality=lqi,
                     device_min_temp_c=device_min_temp,
                     device_max_temp_c=device_max_temp,
+                    device_min_humidity_pct=device_min_humidity,
+                    device_max_humidity_pct=device_max_humidity,
+                    battery_voltage_mv=battery_voltage,
                 ))
 
     return readings

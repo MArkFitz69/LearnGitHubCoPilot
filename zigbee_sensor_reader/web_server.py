@@ -153,6 +153,7 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
     sonoff = []
     shelly = []
     hive = []
+    hotwater = []
 
     for row in latest_rows:
         ieee_address = row["ieee_address"]
@@ -164,6 +165,26 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
             if configured_name:
                 latest["friendly_name"] = configured_name
         daily = daily_by_sensor.get(ieee_address, {})
+
+        if ieee_address.startswith("hive-hw:"):
+            # Hive hot water — state/mode only, no temperature
+            hw_on = row["heating_on"] == 1
+            boost_on = row["boost_on"] == 1
+            if boost_on:
+                status = "boost"
+            elif hw_on:
+                status = "on"
+            else:
+                status = "off"
+            hotwater.append({
+                **latest,
+                "status": status,
+                "runtime_today_seconds": hive_runtime_seconds.get(ieee_address, 0.0),
+                "runtime_today_hhmm": _format_duration_hhmm(
+                    hive_runtime_seconds.get(ieee_address, 0.0)
+                ),
+            })
+            continue
 
         if ieee_address.startswith("hive:"):
             heating_on = row["heating_on"] == 1
@@ -206,6 +227,7 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
 
     sonoff.sort(key=lambda row: (_zone_sort_key(row.get("zone")), row.get("friendly_name") or row.get("ieee_address")))
     hive.sort(key=lambda row: (_zone_sort_key(row.get("zone")), row.get("friendly_name") or row.get("ieee_address")))
+    hotwater.sort(key=lambda row: (row.get("friendly_name") or row.get("ieee_address")))
     shelly.sort(key=lambda row: (_zone_sort_key(row.get("zone")), row.get("friendly_name") or row.get("ieee_address")))
 
     return {
@@ -217,6 +239,7 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
         "sonoff": sonoff,
         "shelly": shelly,
         "hive": hive,
+        "hotwater": hotwater,
     }
 
 
@@ -321,8 +344,8 @@ def dashboard():
   <table>
     <thead>
       <tr>
-        <th>Thermostat</th><th>Zone</th><th>Timestamp</th><th>Current Temp (C)</th>
-        <th>Target Temp (C)</th><th>Mode</th><th>Status</th><th>Daily Runtime (HH:MM)</th>
+        <th>Thermostat</th><th>Zone</th><th>Timestamp</th><th>Current Temp (°C)</th>
+        <th>Target Temp (°C)</th><th>Mode</th><th>Status</th><th>Daily Runtime (HH:MM)</th>
       </tr>
     </thead>
     <tbody>
@@ -341,12 +364,36 @@ def dashboard():
     </tbody>
   </table>
 
+  <h2>Hive Hot Water</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Device</th><th>Timestamp</th><th>Mode</th><th>Status</th><th>Daily Runtime (HH:MM)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for h in hotwater %}
+      <tr>
+        <td>{{ h.friendly_name or h.ieee_address }}</td>
+        <td>{{ h.timestamp }}</td>
+        <td>{{ h.heating_mode or "-" }}</td>
+        <td class="status-{{ h.status }}">{{ h.status }}</td>
+        <td>{{ h.runtime_today_hhmm }}</td>
+      </tr>
+      {% endfor %}
+      {% if not hotwater %}
+      <tr><td colspan="5" style="color:#999">No hot water data yet</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+
   <h2>Shelly Blu H&amp;T</h2>
   <table>
     <thead>
       <tr>
-        <th>Sensor</th><th>Zone</th><th>Timestamp</th><th>Temp (C)</th><th>Humidity (%)</th><th>Battery (%)</th>
-        <th>Daily Low/High Temp (C)</th><th>Daily Low/High Humidity (%)</th>
+        <th>Sensor</th><th>Zone</th><th>Timestamp</th><th>Temp (°C)</th><th>Humidity (%)</th>
+        <th>Battery (%)</th><th>Voltage (V)</th><th>RSSI</th>
+        <th>Today Low/High Temp (°C)</th><th>Today Low/High Humidity (%)</th>
       </tr>
     </thead>
     <tbody>
@@ -358,6 +405,8 @@ def dashboard():
         <td>{% if s.temperature_c is not none %}{{ "%.1f"|format(s.temperature_c) }}{% else %}-{% endif %}</td>
         <td>{% if s.humidity_pct is not none %}{{ "%.1f"|format(s.humidity_pct) }}{% else %}-{% endif %}</td>
         <td>{% if s.battery_pct is not none %}{{ "%.0f"|format(s.battery_pct) }}{% else %}-{% endif %}</td>
+        <td>{% if s.battery_voltage_mv is not none %}{{ "%.2f"|format(s.battery_voltage_mv / 1000) }}{% else %}-{% endif %}</td>
+        <td>{% if s.rssi is not none %}{{ s.rssi }}{% else %}-{% endif %}</td>
         <td>
           {% if s.min_temp_c is not none and s.max_temp_c is not none %}
             {{ "%.1f"|format(s.min_temp_c) }} / {{ "%.1f"|format(s.max_temp_c) }}
@@ -408,9 +457,11 @@ def api_readings():
 
     query = """
         SELECT r.ieee_address, s.friendly_name, r.timestamp,
-               r.temperature_c, r.humidity_pct, r.battery_pct,
-               r.zone, r.heating_on, r.boost_on,
-               r.target_temp_c, r.heating_mode
+               r.temperature_c, r.humidity_pct, r.battery_pct, r.battery_voltage_mv,
+               r.link_quality, r.rssi, r.zone,
+               r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
+               r.device_min_temp_c, r.device_max_temp_c,
+               r.device_min_humidity_pct, r.device_max_humidity_pct
         FROM readings r
         LEFT JOIN sensors s ON r.ieee_address = s.ieee_address
         WHERE 1=1
@@ -449,9 +500,11 @@ def api_readings_latest():
     conn = get_db()
     rows = conn.execute("""
         SELECT r.ieee_address, s.friendly_name, r.timestamp,
-               r.temperature_c, r.humidity_pct, r.battery_pct,
-               r.zone, r.heating_on, r.boost_on,
-               r.target_temp_c, r.heating_mode
+               r.temperature_c, r.humidity_pct, r.battery_pct, r.battery_voltage_mv,
+               r.link_quality, r.rssi, r.zone,
+               r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
+               r.device_min_temp_c, r.device_max_temp_c,
+               r.device_min_humidity_pct, r.device_max_humidity_pct
         FROM readings r
         INNER JOIN (
             SELECT ieee_address, MAX(timestamp) as max_ts
@@ -479,9 +532,11 @@ def api_export_csv():
 
     query = """
         SELECT r.ieee_address, s.friendly_name, r.timestamp,
-               r.temperature_c, r.humidity_pct, r.battery_pct,
-               r.zone, r.heating_on, r.boost_on,
-               r.target_temp_c, r.heating_mode
+               r.temperature_c, r.humidity_pct, r.battery_pct, r.battery_voltage_mv,
+               r.link_quality, r.rssi, r.zone,
+               r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
+               r.device_min_temp_c, r.device_max_temp_c,
+               r.device_min_humidity_pct, r.device_max_humidity_pct
         FROM readings r
         LEFT JOIN sensors s ON r.ieee_address = s.ieee_address
         WHERE 1=1
