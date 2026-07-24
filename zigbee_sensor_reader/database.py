@@ -42,6 +42,8 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             ieee_address  TEXT    NOT NULL,
             timestamp     TEXT    NOT NULL,
+            reading_date  TEXT,
+            reading_time  TEXT,
             temperature_c REAL,
             humidity_pct  REAL,
             battery_pct   REAL,
@@ -78,12 +80,24 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         ("readings", "device_max_humidity_pct", "REAL"),
         ("readings", "battery_voltage_mv", "REAL"),
         ("readings", "rssi", "INTEGER"),
+        ("readings", "reading_date", "TEXT"),
+        ("readings", "reading_time", "TEXT"),
     ]
     for table, col, col_type in migrations:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError:
             pass  # column already exists
+
+    # Backfill derived date/time columns for older rows.
+    conn.execute(
+        """
+        UPDATE readings
+        SET reading_date = COALESCE(reading_date, substr(timestamp, 1, 10)),
+            reading_time = COALESCE(reading_time, substr(timestamp, 12, 8))
+        WHERE reading_date IS NULL OR reading_time IS NULL
+        """
+    )
     conn.commit()
 
 
@@ -132,18 +146,20 @@ def insert_reading(
 ) -> None:
     """Store a single sensor reading."""
     now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    reading_date = now[:10]
+    reading_time = now[11:19]
     heating_int = int(heating_on) if heating_on is not None else None
     boost_int = int(boost_on) if boost_on is not None else None
     conn.execute(
         """
-        INSERT INTO readings (ieee_address, timestamp, temperature_c, humidity_pct,
+        INSERT INTO readings (ieee_address, timestamp, reading_date, reading_time, temperature_c, humidity_pct,
             battery_pct, link_quality, zone, heating_on, boost_on, target_temp_c,
             heating_mode, device_min_temp_c, device_max_temp_c,
             device_min_humidity_pct, device_max_humidity_pct,
             battery_voltage_mv, rssi)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (ieee_address, now, temperature_c, humidity_pct, battery_pct, link_quality,
+        (ieee_address, now, reading_date, reading_time, temperature_c, humidity_pct, battery_pct, link_quality,
          zone, heating_int, boost_int, target_temp_c, heating_mode,
          device_min_temp_c, device_max_temp_c,
          device_min_humidity_pct, device_max_humidity_pct,
