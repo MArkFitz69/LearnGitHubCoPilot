@@ -14,3 +14,6 @@ bleak>=0.21.0
 
 # Web API for remote data access (Power BI, Excel, etc.)
 flask>=3.0.0
+
+# System monitoring for /system status page
+psutil>=5.9.0
