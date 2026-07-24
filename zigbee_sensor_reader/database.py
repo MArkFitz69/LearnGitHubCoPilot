@@ -134,7 +134,6 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         WHERE reading_date IS NULL OR reading_time IS NULL
         """
     )
-
     now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     conn.execute(
         """
