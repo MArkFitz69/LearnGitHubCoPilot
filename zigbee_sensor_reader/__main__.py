@@ -102,6 +102,16 @@ def _handle_device_joined(conn, ieee_address: str, model: str | None) -> None:
     record_device_joined(conn, ieee_address, model)
 
 
+async def _recover_listener_for_pairing(listener) -> None:
+    """Reinitialize the Zigbee listener to recover from stale EZSP transport state."""
+    try:
+        await listener.stop()
+    except Exception as exc:
+        logger.warning("Listener stop during pairing recovery failed: %s", exc)
+    await asyncio.sleep(1)
+    await listener.start()
+
+
 async def _process_onboarding_commands(listener, conn) -> None:
     maybe_close_expired_pairing(conn)
     for row in fetch_pending_commands(conn):
@@ -111,12 +121,22 @@ async def _process_onboarding_commands(listener, conn) -> None:
             mark_command_failed(conn, command_id, f"Unknown command: {command}")
             continue
 
-        try:
-            await listener.permit_join(duration=120)
-            set_pairing_state(conn, active=True, duration_seconds=120)
-            mark_command_done(conn, command_id)
-        except Exception as exc:
-            mark_command_failed(conn, command_id, f"permit_join failed: {exc}")
+        last_error = None
+        for attempt in (1, 2):
+            try:
+                await listener.permit_join(duration=120)
+                set_pairing_state(conn, active=True, duration_seconds=120)
+                mark_command_done(conn, command_id)
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.warning("permit_join attempt %d failed: %s", attempt, exc)
+                if attempt == 1:
+                    await _recover_listener_for_pairing(listener)
+
+        if last_error is not None:
+            mark_command_failed(conn, command_id, f"permit_join failed: {last_error}")
 
 
 async def run_collector(pair: bool = False) -> None:
