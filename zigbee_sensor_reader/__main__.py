@@ -13,10 +13,20 @@ import argparse
 import asyncio
 import logging
 import sys
+import time
 
 from .config import POLLING_INTERVAL, SENSOR_NAMES, ZONES
 from .database import get_connection, insert_reading, upsert_sensor
 from .export import export_to_csv, export_to_excel, get_sensor_summary
+from .onboarding import (
+    fetch_pending_commands,
+    mark_command_done,
+    mark_command_failed,
+    maybe_close_expired_pairing,
+    record_device_joined,
+    record_first_reading,
+    set_pairing_state,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,13 +36,24 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _get_sensor_metadata(conn, ieee_address: str):
+    return conn.execute(
+        "SELECT friendly_name, zone FROM sensors WHERE ieee_address = ?",
+        (ieee_address,),
+    ).fetchone()
+
+
 def handle_reading(reading, conn) -> None:
     """Process an incoming sensor reading: store in DB and print to console."""
-    zone = ZONES.get(reading.ieee_address)
+    existing = _get_sensor_metadata(conn, reading.ieee_address)
+    zone = ZONES.get(reading.ieee_address) or (existing["zone"] if existing else None)
+    friendly_name = reading.friendly_name
+    if (not friendly_name or friendly_name == reading.ieee_address) and existing:
+        friendly_name = existing["friendly_name"] or reading.friendly_name
     upsert_sensor(
         conn,
         ieee_address=reading.ieee_address,
-        friendly_name=reading.friendly_name,
+        friendly_name=friendly_name,
         model=reading.model,
         zone=zone,
     )
@@ -51,8 +72,9 @@ def handle_reading(reading, conn) -> None:
         device_max_humidity_pct=getattr(reading, "device_max_humidity_pct", None),
         battery_voltage_mv=getattr(reading, "battery_voltage_mv", None),
     )
+    record_first_reading(conn, reading.ieee_address)
 
-    parts = [f"[{reading.friendly_name}]"]
+    parts = [f"[{friendly_name}]"]
     if zone:
         parts.append(f"({zone})")
     if reading.temperature_c is not None:
@@ -71,6 +93,32 @@ def handle_reading(reading, conn) -> None:
     print("  ".join(parts))
 
 
+def _handle_device_joined(conn, ieee_address: str, model: str | None) -> None:
+    upsert_sensor(
+        conn,
+        ieee_address=ieee_address,
+        model=model,
+    )
+    record_device_joined(conn, ieee_address, model)
+
+
+async def _process_onboarding_commands(listener, conn) -> None:
+    maybe_close_expired_pairing(conn)
+    for row in fetch_pending_commands(conn):
+        command_id = row["id"]
+        command = row["command"]
+        if command != "start_pairing":
+            mark_command_failed(conn, command_id, f"Unknown command: {command}")
+            continue
+
+        try:
+            await listener.permit_join(duration=120)
+            set_pairing_state(conn, active=True, duration_seconds=120)
+            mark_command_done(conn, command_id)
+        except Exception as exc:
+            mark_command_failed(conn, command_id, f"permit_join failed: {exc}")
+
+
 async def run_collector(pair: bool = False) -> None:
     """Run the main data collection loop."""
     # Import Zigbee dependencies only when actually collecting data
@@ -84,7 +132,8 @@ async def run_collector(pair: bool = False) -> None:
         upsert_sensor(conn, ieee_address=ieee, friendly_name=name, zone=ZONES.get(ieee))
 
     listener = ZigbeeSensorListener(
-        on_reading=lambda reading: handle_reading(reading, conn)
+        on_reading=lambda reading: handle_reading(reading, conn),
+        on_device_joined=lambda ieee, model: _handle_device_joined(conn, ieee, model),
     )
 
     try:
@@ -96,6 +145,7 @@ async def run_collector(pair: bool = False) -> None:
                 "Put your sensor in pairing mode now (hold button 5+ seconds)."
             )
             await listener.permit_join(duration=120)
+            set_pairing_state(conn, active=True, duration_seconds=120)
 
         logger.info(
             "Collecting sensor data (Ctrl+C to stop). "
@@ -103,11 +153,16 @@ async def run_collector(pair: bool = False) -> None:
             POLLING_INTERVAL,
         )
 
-        # Sensors report asynchronously via attribute_updated callback
-        # Also poll Hive thermostats on each interval
+        next_sensor_poll = 0.0
         while True:
-            await asyncio.sleep(POLLING_INTERVAL)
-            logger.debug("Heartbeat – still listening...")
+            await _process_onboarding_commands(listener, conn)
+
+            now = time.monotonic()
+            if now < next_sensor_poll:
+                await asyncio.sleep(1)
+                continue
+
+            next_sensor_poll = now + POLLING_INTERVAL
 
             # Read cached Zigbee sensor values and store them
             try:

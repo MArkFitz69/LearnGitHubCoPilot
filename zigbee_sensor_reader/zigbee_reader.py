@@ -9,7 +9,7 @@ The Sonoff Dongle-M uses an EFR32MG21 chip which speaks the EZSP protocol.
 
 import asyncio
 import logging
-from typing import Any, Callable
+from typing import Callable
 
 import zigpy.config as zigpy_conf
 import zigpy.types as zigpy_types
@@ -67,6 +67,7 @@ class SensorReading:
 
 # Callback type: called whenever a new reading arrives
 ReadingCallback = Callable[[SensorReading], None]
+DeviceJoinedCallback = Callable[[str, str | None], None]
 
 
 class ZigbeeSensorListener:
@@ -77,9 +78,15 @@ class ZigbeeSensorListener:
     the Sonoff Dongle-M requires.
     """
 
-    def __init__(self, on_reading: ReadingCallback | None = None):
+    def __init__(
+        self,
+        on_reading: ReadingCallback | None = None,
+        on_device_joined: DeviceJoinedCallback | None = None,
+    ):
         self.on_reading = on_reading
+        self.on_device_joined = on_device_joined
         self.app: ControllerApplication | None = None
+        self._registered_clusters: set[tuple[str, int, int]] = set()
 
     def _get_zigpy_config(self) -> dict:
         """Build the zigpy configuration dict for bellows/EZSP (ember adapter)."""
@@ -126,24 +133,31 @@ class ZigbeeSensorListener:
 
     def _register_cluster_listeners(self) -> None:
         """Add listeners on every relevant cluster of every device."""
+        for ieee, device in self.app.devices.items():
+            self._register_device_cluster_listeners(str(ieee), device)
+
+    def _register_device_cluster_listeners(self, ieee: str, device) -> None:
         target_clusters = (
             TemperatureMeasurement.cluster_id,
             RelativeHumidity.cluster_id,
             PowerConfiguration.cluster_id,
         )
-        for ieee, device in self.app.devices.items():
-            for ep_id, endpoint in device.endpoints.items():
-                if ep_id == 0:
-                    continue  # skip ZDO
-                for cluster_id in target_clusters:
-                    if cluster_id in endpoint.in_clusters:
-                        cluster = endpoint.in_clusters[cluster_id]
-                        cluster.add_listener(_ClusterListener(self, cluster))
-                        logger.debug(
-                            "Registered listener on %s cluster 0x%04X",
-                            SENSOR_NAMES.get(str(ieee), str(ieee)),
-                            cluster_id,
-                        )
+        for ep_id, endpoint in device.endpoints.items():
+            if ep_id == 0:
+                continue  # skip ZDO
+            for cluster_id in target_clusters:
+                if cluster_id in endpoint.in_clusters:
+                    reg_key = (ieee, ep_id, cluster_id)
+                    if reg_key in self._registered_clusters:
+                        continue
+                    cluster = endpoint.in_clusters[cluster_id]
+                    cluster.add_listener(_ClusterListener(self, cluster))
+                    self._registered_clusters.add(reg_key)
+                    logger.debug(
+                        "Registered listener on %s cluster 0x%04X",
+                        SENSOR_NAMES.get(ieee, ieee),
+                        cluster_id,
+                    )
 
     async def stop(self) -> None:
         """Shut down the Zigbee coordinator cleanly."""
@@ -161,21 +175,6 @@ class ZigbeeSensorListener:
         if self.app:
             await self.app.permit(duration)
             logger.info("Network open for joining (%d seconds).", duration)
-
-
-class _ClusterListener:
-    """Lightweight listener attached to a single cluster, forwarding to the main handler."""
-
-    def __init__(self, parent: "ZigbeeSensorListener", cluster):
-        self.parent = parent
-        self.cluster = cluster
-
-    def attribute_updated(self, attrid, value, *args):
-        """Called by zigpy when this cluster receives an attribute report."""
-        self.parent._handle_attribute(self.cluster, attrid, value)
-
-    def cluster_command(self, *args, **kwargs):
-        pass
 
     # ── zigpy listener callbacks ──────────────────────────────────────
 
@@ -218,16 +217,34 @@ class _ClusterListener:
         """Called when a new device joins the network."""
         ieee = str(device.ieee)
         model = getattr(device, "model", None)
+        self._register_device_cluster_listeners(ieee, device)
         logger.info("New device joined: %s (model=%s)", ieee, model)
         logger.info(
             "Add this to SENSOR_NAMES in config.py:\n"
             '    "%s": "Room Name",',
             ieee,
         )
+        if self.on_device_joined:
+            self.on_device_joined(ieee, model)
 
     def device_left(self, device) -> None:
         """Called when a device leaves the network."""
         logger.info("Device left: %s", device.ieee)
+
+
+class _ClusterListener:
+    """Lightweight listener attached to a single cluster, forwarding to the main handler."""
+
+    def __init__(self, parent: "ZigbeeSensorListener", cluster):
+        self.parent = parent
+        self.cluster = cluster
+
+    def attribute_updated(self, attrid, value, *args):
+        """Called by zigpy when this cluster receives an attribute report."""
+        self.parent._handle_attribute(self.cluster, attrid, value)
+
+    def cluster_command(self, *args, **kwargs):
+        pass
 
 
 async def poll_sensors(app: ControllerApplication) -> list[SensorReading]:
@@ -303,10 +320,7 @@ def read_cached_sensors(app: ControllerApplication) -> list[SensorReading]:
 
     for ieee, device in app.devices.items():
         ieee_str = str(ieee)
-        if ieee_str not in SENSOR_NAMES:
-            continue
-
-        friendly = SENSOR_NAMES[ieee_str]
+        friendly = SENSOR_NAMES.get(ieee_str, ieee_str)
         model = getattr(device, "model", None)
 
         for ep_id, endpoint in device.endpoints.items():
