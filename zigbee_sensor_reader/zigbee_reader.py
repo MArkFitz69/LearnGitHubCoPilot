@@ -37,6 +37,8 @@ class SensorReading:
         humidity_pct: float | None = None,
         battery_pct: float | None = None,
         link_quality: int | None = None,
+        device_min_temp_c: float | None = None,
+        device_max_temp_c: float | None = None,
     ):
         self.ieee_address = ieee_address
         self.friendly_name = friendly_name
@@ -45,6 +47,8 @@ class SensorReading:
         self.humidity_pct = humidity_pct
         self.battery_pct = battery_pct
         self.link_quality = link_quality
+        self.device_min_temp_c = device_min_temp_c
+        self.device_max_temp_c = device_max_temp_c
 
     def __repr__(self) -> str:
         return (
@@ -306,12 +310,22 @@ def read_cached_sensors(app: ControllerApplication) -> list[SensorReading]:
             temp = None
             humidity = None
             battery = None
+            device_min_temp = None
+            device_max_temp = None
 
             if TemperatureMeasurement.cluster_id in endpoint.in_clusters:
                 cluster = endpoint.in_clusters[TemperatureMeasurement.cluster_id]
                 val = cluster.get(0x0000)  # measured_value
                 if val is not None:
                     temp = val / 100.0
+                # 0x0001 = min_measured_value, 0x0002 = max_measured_value
+                # On SNZB-02DR2 these hold the device's rolling daily min/max
+                min_val = cluster.get(0x0001)
+                max_val = cluster.get(0x0002)
+                if min_val is not None and min_val != 0x8000:  # 0x8000 = invalid/unset
+                    device_min_temp = min_val / 100.0
+                if max_val is not None and max_val != 0x8000:
+                    device_max_temp = max_val / 100.0
 
             if RelativeHumidity.cluster_id in endpoint.in_clusters:
                 cluster = endpoint.in_clusters[RelativeHumidity.cluster_id]
@@ -333,6 +347,8 @@ def read_cached_sensors(app: ControllerApplication) -> list[SensorReading]:
                     temperature_c=temp,
                     humidity_pct=humidity,
                     battery_pct=battery,
+                    device_min_temp_c=device_min_temp,
+                    device_max_temp_c=device_max_temp,
                 ))
 
     return readings

@@ -45,6 +45,8 @@ def handle_reading(reading, conn) -> None:
         battery_pct=reading.battery_pct,
         link_quality=reading.link_quality,
         zone=zone,
+        device_min_temp_c=getattr(reading, "device_min_temp_c", None),
+        device_max_temp_c=getattr(reading, "device_max_temp_c", None),
     )
 
     parts = [f"[{reading.friendly_name}]"]
@@ -56,6 +58,10 @@ def handle_reading(reading, conn) -> None:
         parts.append(f"Humidity: {reading.humidity_pct:.1f}%")
     if reading.battery_pct is not None:
         parts.append(f"Battery: {reading.battery_pct:.0f}%")
+    dmin = getattr(reading, "device_min_temp_c", None)
+    dmax = getattr(reading, "device_max_temp_c", None)
+    if dmin is not None and dmax is not None:
+        parts.append(f"Device min/max: {dmin:.1f}/{dmax:.1f}°C")
     print("  ".join(parts))
 
 
