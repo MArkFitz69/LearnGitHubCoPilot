@@ -87,6 +87,9 @@ sudo systemctl edit sensor-data-api
 
 # In sensor-data-api override, set:
 # Environment=ONBOARDING_PASSCODE=your-strong-passcode
+# Optional zigbee collector tuning (set in zigbee-sensor-reader override):
+# Environment=ZIGBEE_ACTIVE_POLL_ON_STALE_CACHE=0
+# Environment=ZIGBEE_STALE_AFTER_SECONDS=1800
 
 # Enable and start
 sudo systemctl enable --now zigbee-sensor-reader
@@ -154,11 +157,11 @@ Available endpoints:
 | `/system` | Pi and application status page |
 | `/api/status` | System overview (sensor count, latest reading) |
 | `/api/dashboard` | Dashboard data as JSON (daily min/max + Hive runtime) |
-| `/api/sensors` | All registered sensors with zones |
+| `/api/sensors` | All registered sensors with zones + freshness fields |
 | `/api/readings?format=csv` | All readings as CSV |
 | `/api/readings?zone=Zone 1&format=csv` | Filter by zone |
 | `/api/readings?start=2026-01-01&end=2026-03-31&format=csv` | Filter by date |
-| `/api/readings/latest?format=csv` | Latest reading per sensor |
+| `/api/readings/latest?format=csv` | Latest reading per sensor + freshness fields |
 | `/api/export/csv` | Download full CSV file |
 
 Onboarding-specific endpoints:

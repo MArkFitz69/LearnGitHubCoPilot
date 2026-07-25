@@ -15,7 +15,13 @@ import logging
 import sys
 import time
 
-from .config import POLLING_INTERVAL, SENSOR_NAMES, ZONES
+from .config import (
+    POLLING_INTERVAL,
+    SENSOR_NAMES,
+    ZIGBEE_ACTIVE_POLL_INTERVAL,
+    ZIGBEE_ACTIVE_POLL_ON_STALE_CACHE,
+    ZONES,
+)
 from .database import get_connection, insert_reading, upsert_sensor
 from .export import export_to_csv, export_to_excel, get_sensor_summary
 from .onboarding import (
@@ -210,7 +216,6 @@ async def run_collector(pair: bool = False) -> None:
 
         next_sensor_poll = 0.0
         next_forced_poll = 0.0
-        forced_poll_interval = max(POLLING_INTERVAL * 4, 1800)
         last_signatures = _load_last_signatures(conn)
         while True:
             await _process_onboarding_commands(listener, conn)
@@ -247,6 +252,8 @@ async def run_collector(pair: bool = False) -> None:
                 # If every cached sensor is unchanged for this cycle, attempt an
                 # active network read (throttled) to refresh potentially stale cache.
                 if (
+                    ZIGBEE_ACTIVE_POLL_ON_STALE_CACHE
+                    and
                     cached
                     and skipped == len(cached)
                     and now >= next_forced_poll
@@ -266,7 +273,7 @@ async def run_collector(pair: bool = False) -> None:
                         last_signatures[reading.ieee_address] = signature
                         forced_stored += 1
 
-                    next_forced_poll = time.monotonic() + forced_poll_interval
+                    next_forced_poll = time.monotonic() + ZIGBEE_ACTIVE_POLL_INTERVAL
                     logger.info(
                         "Forced Zigbee poll checked %d sensors, stored %d changed readings",
                         forced_checked,

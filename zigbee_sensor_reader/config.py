@@ -39,6 +39,17 @@ DATABASE_PATH = os.environ.get(
 # How often to poll sensors for new data (in seconds)
 POLLING_INTERVAL = int(os.environ.get("ZIGBEE_POLL_INTERVAL", "60"))
 
+# Optional active Zigbee reads when all cached values are unchanged.
+# Disabled by default because sleepy battery sensors often ignore direct polls,
+# and repeated attempts can destabilize some network adapters.
+ZIGBEE_ACTIVE_POLL_ON_STALE_CACHE = os.environ.get(
+    "ZIGBEE_ACTIVE_POLL_ON_STALE_CACHE",
+    "0",
+).strip().lower() in {"1", "true", "yes", "on"}
+ZIGBEE_ACTIVE_POLL_INTERVAL = int(
+    os.environ.get("ZIGBEE_ACTIVE_POLL_INTERVAL", str(max(POLLING_INTERVAL * 4, 1800)))
+)
+
 # CSV / Excel export directory
 EXPORT_DIR = os.environ.get(
     "ZIGBEE_EXPORT_DIR",

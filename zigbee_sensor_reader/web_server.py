@@ -54,6 +54,9 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+FRESHNESS_AGING_AFTER_SECONDS = int(os.environ.get("ZIGBEE_AGING_AFTER_SECONDS", "900"))
+FRESHNESS_STALE_AFTER_SECONDS = int(os.environ.get("ZIGBEE_STALE_AFTER_SECONDS", "1800"))
+
 
 def get_db() -> sqlite3.Connection:
     """Get a read-only database connection."""
@@ -116,6 +119,85 @@ def _zone_sort_key(zone: str | None) -> tuple[int, str]:
         if suffix.isdigit():
             return (int(suffix), zone)
     return (999, zone)
+
+
+def _reading_age_seconds(timestamp_iso: str | None) -> int | None:
+    if not timestamp_iso:
+        return None
+    try:
+        reading_ts = _parse_iso_timestamp(timestamp_iso)
+    except ValueError:
+        return None
+    return max(0, int((datetime.now() - reading_ts).total_seconds()))
+
+
+def _freshness_state(age_seconds: int | None) -> str:
+    if age_seconds is None:
+        return "unknown"
+    if age_seconds <= FRESHNESS_AGING_AFTER_SECONDS:
+        return "fresh"
+    if age_seconds <= FRESHNESS_STALE_AFTER_SECONDS:
+        return "aging"
+    return "stale"
+
+
+def _get_zigbee_freshness_map(conn: sqlite3.Connection) -> dict[str, dict]:
+    """Return freshness metadata for Zigbee IEEE-address devices."""
+    rows = conn.execute(
+        """
+        WITH zigbee AS (
+            SELECT
+                r.ieee_address,
+                r.id,
+                r.timestamp,
+                r.temperature_c,
+                r.humidity_pct,
+                r.battery_pct,
+                LAG(r.temperature_c) OVER (PARTITION BY r.ieee_address ORDER BY r.id) AS prev_temp_c,
+                LAG(r.humidity_pct) OVER (PARTITION BY r.ieee_address ORDER BY r.id) AS prev_humidity_pct,
+                LAG(r.battery_pct) OVER (PARTITION BY r.ieee_address ORDER BY r.id) AS prev_battery_pct
+            FROM readings r
+            WHERE r.ieee_address GLOB '??:??:??:??:??:??:??:??'
+        ),
+        changes AS (
+            SELECT
+                ieee_address,
+                MAX(
+                    CASE
+                        WHEN prev_temp_c IS NULL
+                             OR COALESCE(temperature_c, -9999.0) != COALESCE(prev_temp_c, -9999.0)
+                             OR COALESCE(humidity_pct, -9999.0) != COALESCE(prev_humidity_pct, -9999.0)
+                             OR COALESCE(battery_pct, -9999.0) != COALESCE(prev_battery_pct, -9999.0)
+                        THEN timestamp
+                    END
+                ) AS last_value_change_at
+            FROM zigbee
+            GROUP BY ieee_address
+        ),
+        latest AS (
+            SELECT ieee_address, MAX(timestamp) AS last_event_at
+            FROM zigbee
+            GROUP BY ieee_address
+        )
+        SELECT
+            l.ieee_address,
+            l.last_event_at,
+            c.last_value_change_at
+        FROM latest l
+        LEFT JOIN changes c ON c.ieee_address = l.ieee_address
+        """
+    ).fetchall()
+    freshness = {}
+    for row in rows:
+        last_event_at = row["last_event_at"]
+        age_seconds = _reading_age_seconds(last_event_at)
+        freshness[row["ieee_address"]] = {
+            "last_event_at": last_event_at,
+            "last_value_change_at": row["last_value_change_at"],
+            "age_seconds": age_seconds,
+            "freshness_state": _freshness_state(age_seconds),
+        }
+    return freshness
 
 
 def _get_system_info() -> dict:
@@ -1188,13 +1270,28 @@ def api_onboarding_status():
 def api_sensors():
     """List all registered sensors."""
     conn = get_db()
+    freshness = _get_zigbee_freshness_map(conn)
     rows = conn.execute(
         "SELECT ieee_address, friendly_name, model, zone, first_seen, last_seen "
         "FROM sensors ORDER BY friendly_name"
     ).fetchall()
     conn.close()
 
-    sensors = [dict(row) for row in rows]
+    sensors = []
+    for row in rows:
+        item = dict(row)
+        if item["ieee_address"] in freshness:
+            item.update(freshness[item["ieee_address"]])
+        else:
+            item.update(
+                {
+                    "last_event_at": None,
+                    "last_value_change_at": None,
+                    "age_seconds": None,
+                    "freshness_state": "unknown",
+                }
+            )
+        sensors.append(item)
     return jsonify(sensors)
 
 
@@ -1255,6 +1352,7 @@ def api_readings():
 def api_readings_latest():
     """Get the most recent reading for each sensor."""
     conn = get_db()
+    freshness = _get_zigbee_freshness_map(conn)
     rows = conn.execute("""
         SELECT r.ieee_address, s.friendly_name, r.timestamp, r.reading_date, r.reading_time,
                r.temperature_c, r.humidity_pct, r.battery_pct, r.battery_voltage_mv,
@@ -1273,11 +1371,27 @@ def api_readings_latest():
     """).fetchall()
     conn.close()
 
+    data = []
+    for row in rows:
+        item = dict(row)
+        if item["ieee_address"] in freshness:
+            item.update(freshness[item["ieee_address"]])
+        else:
+            item.update(
+                {
+                    "last_event_at": item.get("timestamp"),
+                    "last_value_change_at": item.get("timestamp"),
+                    "age_seconds": _reading_age_seconds(item.get("timestamp")),
+                    "freshness_state": _freshness_state(_reading_age_seconds(item.get("timestamp"))),
+                }
+            )
+        data.append(item)
+
     output_format = request.args.get("format", "json")
     if output_format == "csv":
-        return _rows_to_csv(rows)
+        return _rows_to_csv(data)
 
-    return jsonify([dict(row) for row in rows])
+    return jsonify(data)
 
 
 @app.route("/api/export/csv")
