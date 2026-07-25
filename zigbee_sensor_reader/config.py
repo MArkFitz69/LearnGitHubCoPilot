@@ -38,6 +38,12 @@ DATABASE_PATH = os.environ.get(
 
 # How often to poll sensors for new data (in seconds)
 POLLING_INTERVAL = int(os.environ.get("ZIGBEE_POLL_INTERVAL", "60"))
+ZIGBEE_PERIODIC_LOG_INTERVAL_SECONDS = int(
+    os.environ.get("ZIGBEE_PERIODIC_LOG_INTERVAL_SECONDS", "900")
+)
+ZIGBEE_HEARTBEAT_STALE_SECONDS = int(
+    os.environ.get("ZIGBEE_HEARTBEAT_STALE_SECONDS", "5400")
+)
 
 # Optional active Zigbee reads when all cached values are unchanged.
 # Disabled by default because sleepy battery sensors often ignore direct polls,

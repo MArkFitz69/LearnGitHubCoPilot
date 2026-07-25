@@ -143,50 +143,71 @@ def _freshness_state(age_seconds: int | None) -> str:
 
 def _get_zigbee_freshness_map(conn: sqlite3.Connection) -> dict[str, dict]:
     """Return freshness metadata for Zigbee IEEE-address devices."""
-    rows = conn.execute(
-        """
-        WITH zigbee AS (
-            SELECT
-                r.ieee_address,
-                r.id,
-                r.timestamp,
-                r.temperature_c,
-                r.humidity_pct,
-                r.battery_pct,
-                LAG(r.temperature_c) OVER (PARTITION BY r.ieee_address ORDER BY r.id) AS prev_temp_c,
-                LAG(r.humidity_pct) OVER (PARTITION BY r.ieee_address ORDER BY r.id) AS prev_humidity_pct,
-                LAG(r.battery_pct) OVER (PARTITION BY r.ieee_address ORDER BY r.id) AS prev_battery_pct
-            FROM readings r
-            WHERE r.ieee_address GLOB '??:??:??:??:??:??:??:??'
+    query = """
+        WITH reading_changes AS (
+            SELECT ieee_address, MAX(timestamp) AS last_value_change_at
+            FROM readings
+            WHERE ieee_address GLOB '??:??:??:??:??:??:??:??'
+              AND (reading_source = 'value_change' OR reading_source = 'active_poll_change' OR reading_source IS NULL)
+            GROUP BY ieee_address
         ),
-        changes AS (
-            SELECT
-                ieee_address,
-                MAX(
-                    CASE
-                        WHEN prev_temp_c IS NULL
-                             OR COALESCE(temperature_c, -9999.0) != COALESCE(prev_temp_c, -9999.0)
-                             OR COALESCE(humidity_pct, -9999.0) != COALESCE(prev_humidity_pct, -9999.0)
-                             OR COALESCE(battery_pct, -9999.0) != COALESCE(prev_battery_pct, -9999.0)
-                        THEN timestamp
-                    END
-                ) AS last_value_change_at
-            FROM zigbee
+        frame_latest AS (
+            SELECT ieee_address, MAX(recorded_at) AS last_frame_at
+            FROM zigbee_frame_events
+            GROUP BY ieee_address
+        ),
+        reading_latest AS (
+            SELECT ieee_address, MAX(timestamp) AS last_reading_at
+            FROM readings
+            WHERE ieee_address GLOB '??:??:??:??:??:??:??:??'
             GROUP BY ieee_address
         ),
         latest AS (
-            SELECT ieee_address, MAX(timestamp) AS last_event_at
-            FROM zigbee
-            GROUP BY ieee_address
+            SELECT f.ieee_address, COALESCE(f.last_frame_at, r.last_reading_at) AS last_event_at
+            FROM frame_latest f
+            LEFT JOIN reading_latest r ON r.ieee_address = f.ieee_address
+            UNION
+            SELECT r.ieee_address, COALESCE(f.last_frame_at, r.last_reading_at) AS last_event_at
+            FROM reading_latest r
+            LEFT JOIN frame_latest f ON f.ieee_address = r.ieee_address
         )
         SELECT
             l.ieee_address,
             l.last_event_at,
-            c.last_value_change_at
+            c.last_value_change_at,
+            (
+                SELECT MAX(zigbee_sequence)
+                FROM zigbee_frame_events zfe
+                WHERE zfe.ieee_address = l.ieee_address
+            ) AS last_zigbee_sequence,
+            (
+                SELECT MAX(cluster_id)
+                FROM zigbee_frame_events zfe
+                WHERE zfe.ieee_address = l.ieee_address
+                  AND zfe.recorded_at = l.last_event_at
+            ) AS last_cluster_id,
+            (
+                SELECT MAX(attribute_id)
+                FROM zigbee_frame_events zfe
+                WHERE zfe.ieee_address = l.ieee_address
+                  AND zfe.recorded_at = l.last_event_at
+            ) AS last_attribute_id
         FROM latest l
-        LEFT JOIN changes c ON c.ieee_address = l.ieee_address
+        LEFT JOIN reading_changes c ON c.ieee_address = l.ieee_address
+        WHERE l.ieee_address IS NOT NULL
         """
-    ).fetchall()
+    try:
+        rows = conn.execute(query).fetchall()
+    except sqlite3.OperationalError:
+        # Backward compatibility when frame table is not yet migrated.
+        rows = conn.execute(
+            """
+            SELECT ieee_address, MAX(timestamp) AS last_event_at, MAX(timestamp) AS last_value_change_at
+            FROM readings
+            WHERE ieee_address GLOB '??:??:??:??:??:??:??:??'
+            GROUP BY ieee_address
+            """
+        ).fetchall()
     freshness = {}
     for row in rows:
         last_event_at = row["last_event_at"]
@@ -196,6 +217,9 @@ def _get_zigbee_freshness_map(conn: sqlite3.Connection) -> dict[str, dict]:
             "last_value_change_at": row["last_value_change_at"],
             "age_seconds": age_seconds,
             "freshness_state": _freshness_state(age_seconds),
+            "last_zigbee_sequence": row["last_zigbee_sequence"] if "last_zigbee_sequence" in row.keys() else None,
+            "last_cluster_id": row["last_cluster_id"] if "last_cluster_id" in row.keys() else None,
+            "last_attribute_id": row["last_attribute_id"] if "last_attribute_id" in row.keys() else None,
         }
     return freshness
 
@@ -325,18 +349,50 @@ def _get_system_info() -> dict:
         """).fetchone()
         info["db_counts"] = dict(type_counts)
 
-        # Per-sensor last seen and stale flag
+        # Per-sensor last seen and heartbeat status
         sensor_status = conn.execute("""
-            SELECT s.friendly_name, s.model, s.zone, r.last_ts,
-                   CAST((julianday('now','localtime') - julianday(r.last_ts)) * 1440 AS INTEGER) AS mins_ago
-            FROM sensors s
-            LEFT JOIN (
+            WITH latest_reading AS (
                 SELECT ieee_address, MAX(timestamp) as last_ts
                 FROM readings GROUP BY ieee_address
-            ) r ON s.ieee_address = r.ieee_address
+            ),
+            latest_frame AS (
+                SELECT ieee_address, MAX(recorded_at) as last_frame_at
+                FROM zigbee_frame_events GROUP BY ieee_address
+            )
+            SELECT
+                s.friendly_name,
+                s.model,
+                s.zone,
+                r.last_ts,
+                f.last_frame_at,
+                CAST((julianday('now','localtime') - julianday(r.last_ts)) * 1440 AS INTEGER) AS mins_ago,
+                CAST((julianday('now','localtime') - julianday(f.last_frame_at)) * 1440 AS INTEGER) AS frame_mins_ago
+            FROM sensors s
+            LEFT JOIN latest_reading r ON s.ieee_address = r.ieee_address
+            LEFT JOIN latest_frame f ON s.ieee_address = f.ieee_address
             ORDER BY s.zone, s.friendly_name
         """).fetchall()
-        info["sensor_status"] = [dict(row) for row in sensor_status]
+        statuses = []
+        for row in sensor_status:
+            item = dict(row)
+            frame_age = item.get("frame_mins_ago")
+            model = (item.get("model") or "").lower()
+            is_sonoff = model.startswith("snzb-02")
+            if is_sonoff:
+                if frame_age is None:
+                    heartbeat_state = "no-heartbeat"
+                elif frame_age <= 60:
+                    heartbeat_state = "ok"
+                elif frame_age <= 90:
+                    heartbeat_state = "quiet"
+                else:
+                    heartbeat_state = "stale"
+            else:
+                heartbeat_state = "n/a"
+            item["heartbeat_state"] = heartbeat_state
+            item["possible_offline"] = heartbeat_state in {"stale", "no-heartbeat"}
+            statuses.append(item)
+        info["sensor_status"] = statuses
 
         conn.close()
     except Exception as e:
@@ -707,17 +763,38 @@ def system_page():
 
 <h2>&#128268; Sensor Health</h2>
 <table>
-  <thead><tr><th>Sensor</th><th>Model</th><th>Zone</th><th>Last seen</th><th>Age</th><th>Status</th></tr></thead>
+  <thead><tr><th>Sensor</th><th>Model</th><th>Zone</th><th>Last reading</th><th>Reading age</th><th>Last heartbeat</th><th>Heartbeat age</th><th>Status</th></tr></thead>
   <tbody>
   {% for s in sensors %}
   {% set m = s.mins_ago %}
-  <tr class="{{ 'stale' if m is not none and m > 60 else '' }}">
+  {% set hm = s.frame_mins_ago %}
+  <tr class="{{ 'down' if s.possible_offline else ('stale' if m is not none and m > 60 else '') }}">
     <td>{{ s.friendly_name or "-" }}</td>
     <td style="color:#777;font-size:.82em">{{ s.model or "-" }}</td>
     <td>{{ s.zone or "-" }}</td>
     <td style="font-size:.85em">{{ s.last_ts or "never" }}</td>
     <td>{% if m is not none %}{% if m < 60 %}{{ m }}m{% elif m < 1440 %}{{ m // 60 }}h {{ m % 60 }}m{% else %}{{ m // 1440 }}d {{ (m % 1440) // 60 }}h{% endif %}{% else %}-{% endif %}</td>
-    <td>{% if m is none %}<span class="warn">no data</span>{% elif m > 120 %}<span class="err">&#9888; stale</span>{% elif m > 60 %}<span class="warn">&#9888; slow</span>{% else %}<span class="ok">&#10003; ok</span>{% endif %}</td>
+    <td style="font-size:.85em">{{ s.last_frame_at or "-" }}</td>
+    <td>{% if hm is not none %}{% if hm < 60 %}{{ hm }}m{% elif hm < 1440 %}{{ hm // 60 }}h {{ hm % 60 }}m{% else %}{{ hm // 1440 }}d {{ (hm % 1440) // 60 }}h{% endif %}{% else %}-{% endif %}</td>
+    <td>
+      {% if s.heartbeat_state == 'ok' %}
+        <span class="ok">&#10003; heartbeat ok</span>
+      {% elif s.heartbeat_state == 'quiet' %}
+        <span class="warn">&#9888; heartbeat quiet</span>
+      {% elif s.heartbeat_state == 'stale' %}
+        <span class="err">&#10007; possible offline (heartbeat stale)</span>
+      {% elif s.heartbeat_state == 'no-heartbeat' %}
+        <span class="err">&#10007; possible offline (no heartbeat)</span>
+      {% elif m is none %}
+        <span class="warn">no data</span>
+      {% elif m > 120 %}
+        <span class="err">&#9888; stale reading</span>
+      {% elif m > 60 %}
+        <span class="warn">&#9888; slow reading</span>
+      {% else %}
+        <span class="ok">&#10003; ok</span>
+      {% endif %}
+    </td>
   </tr>
   {% endfor %}
   </tbody>
@@ -1314,7 +1391,8 @@ def api_readings():
                r.temperature_c, r.humidity_pct, r.battery_pct, r.battery_voltage_mv,
                r.link_quality, r.rssi, r.zone,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
-               r.device_min_temp_c, r.device_max_temp_c,
+               r.device_min_temp_c, r.device_max_temp_c, r.reading_source,
+               r.source_event_age_seconds, r.is_stale,
                r.device_min_humidity_pct, r.device_max_humidity_pct
         FROM readings r
         LEFT JOIN sensors s ON r.ieee_address = s.ieee_address
@@ -1358,7 +1436,8 @@ def api_readings_latest():
                r.temperature_c, r.humidity_pct, r.battery_pct, r.battery_voltage_mv,
                r.link_quality, r.rssi, r.zone,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
-               r.device_min_temp_c, r.device_max_temp_c,
+               r.device_min_temp_c, r.device_max_temp_c, r.reading_source,
+               r.source_event_age_seconds, r.is_stale,
                r.device_min_humidity_pct, r.device_max_humidity_pct
         FROM readings r
         INNER JOIN (
@@ -1394,6 +1473,81 @@ def api_readings_latest():
     return jsonify(data)
 
 
+@app.route("/api/zigbee-heartbeat")
+def api_zigbee_heartbeat():
+    """Per-sensor Zigbee heartbeat summary from frame telemetry."""
+    conn = get_db()
+    rows = conn.execute(
+        """
+        WITH frames_1h AS (
+            SELECT ieee_address, COUNT(*) AS frames_last_1h
+            FROM zigbee_frame_events
+            WHERE (julianday('now','localtime') - julianday(recorded_at)) * 1440 <= 60
+            GROUP BY ieee_address
+        ),
+        latest AS (
+            SELECT ieee_address, MAX(recorded_at) AS last_frame_at
+            FROM zigbee_frame_events
+            GROUP BY ieee_address
+        )
+        SELECT
+            s.ieee_address,
+            s.friendly_name,
+            s.model,
+            s.zone,
+            l.last_frame_at,
+            COALESCE(f.frames_last_1h, 0) AS frames_last_1h,
+            CAST((julianday('now','localtime') - julianday(l.last_frame_at)) * 1440 AS INTEGER) AS frame_mins_ago,
+            (
+                SELECT zfe.cluster_id
+                FROM zigbee_frame_events zfe
+                WHERE zfe.ieee_address = s.ieee_address
+                ORDER BY zfe.recorded_at DESC, zfe.id DESC
+                LIMIT 1
+            ) AS last_cluster_id,
+            (
+                SELECT zfe.attribute_id
+                FROM zigbee_frame_events zfe
+                WHERE zfe.ieee_address = s.ieee_address
+                ORDER BY zfe.recorded_at DESC, zfe.id DESC
+                LIMIT 1
+            ) AS last_attribute_id,
+            (
+                SELECT zfe.zigbee_sequence
+                FROM zigbee_frame_events zfe
+                WHERE zfe.ieee_address = s.ieee_address
+                ORDER BY zfe.recorded_at DESC, zfe.id DESC
+                LIMIT 1
+            ) AS last_zigbee_sequence
+        FROM sensors s
+        LEFT JOIN latest l ON l.ieee_address = s.ieee_address
+        LEFT JOIN frames_1h f ON f.ieee_address = s.ieee_address
+        ORDER BY s.zone, s.friendly_name
+        """
+    ).fetchall()
+    conn.close()
+
+    data = []
+    for row in rows:
+        item = dict(row)
+        model = (item.get("model") or "").lower()
+        frame_age = item.get("frame_mins_ago")
+        if model.startswith("snzb-02"):
+            if frame_age is None:
+                state = "no-heartbeat"
+            elif frame_age <= 60:
+                state = "ok"
+            elif frame_age <= 90:
+                state = "quiet"
+            else:
+                state = "stale"
+        else:
+            state = "n/a"
+        item["heartbeat_state"] = state
+        data.append(item)
+    return jsonify(data)
+
+
 @app.route("/api/export/csv")
 def api_export_csv():
     """Export all readings as a downloadable CSV file."""
@@ -1406,7 +1560,8 @@ def api_export_csv():
                r.temperature_c, r.humidity_pct, r.battery_pct, r.battery_voltage_mv,
                r.link_quality, r.rssi, r.zone,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
-               r.device_min_temp_c, r.device_max_temp_c,
+               r.device_min_temp_c, r.device_max_temp_c, r.reading_source,
+               r.source_event_age_seconds, r.is_stale,
                r.device_min_humidity_pct, r.device_max_humidity_pct
         FROM readings r
         LEFT JOIN sensors s ON r.ieee_address = s.ieee_address

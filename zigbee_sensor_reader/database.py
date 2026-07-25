@@ -53,6 +53,9 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             boost_on      INTEGER,
             target_temp_c REAL,
             heating_mode  TEXT,
+            reading_source TEXT,
+            source_event_age_seconds INTEGER,
+            is_stale INTEGER,
             FOREIGN KEY (ieee_address) REFERENCES sensors(ieee_address)
         );
 
@@ -100,6 +103,28 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             expires_at    TEXT NOT NULL,
             revoked_at    TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS zigbee_frame_events (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            recorded_at     TEXT NOT NULL,
+            ieee_address    TEXT NOT NULL,
+            friendly_name   TEXT,
+            endpoint_id     INTEGER,
+            cluster_id      INTEGER,
+            attribute_id    INTEGER,
+            value_text      TEXT,
+            aps_timestamp   TEXT,
+            zigbee_sequence INTEGER,
+            lqi             INTEGER,
+            rssi            INTEGER,
+            source          TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_frame_events_sensor_time
+            ON zigbee_frame_events (ieee_address, recorded_at);
+
+        CREATE INDEX IF NOT EXISTS idx_frame_events_time
+            ON zigbee_frame_events (recorded_at);
         """
     )
     # Add columns to existing databases (safe to run multiple times)
@@ -118,6 +143,9 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         ("readings", "rssi", "INTEGER"),
         ("readings", "reading_date", "TEXT"),
         ("readings", "reading_time", "TEXT"),
+        ("readings", "reading_source", "TEXT"),
+        ("readings", "source_event_age_seconds", "INTEGER"),
+        ("readings", "is_stale", "INTEGER"),
     ]
     for table, col, col_type in migrations:
         try:
@@ -187,6 +215,9 @@ def insert_reading(
     device_max_humidity_pct: float | None = None,
     battery_voltage_mv: float | None = None,
     rssi: int | None = None,
+    reading_source: str | None = None,
+    source_event_age_seconds: int | None = None,
+    is_stale: bool | None = None,
 ) -> None:
     """Store a single sensor reading."""
     now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -194,24 +225,67 @@ def insert_reading(
     reading_time = now[11:19]
     heating_int = int(heating_on) if heating_on is not None else None
     boost_int = int(boost_on) if boost_on is not None else None
+    stale_int = int(is_stale) if is_stale is not None else None
     conn.execute(
         """
         INSERT INTO readings (ieee_address, timestamp, reading_date, reading_time, temperature_c, humidity_pct,
             battery_pct, link_quality, zone, heating_on, boost_on, target_temp_c,
             heating_mode, device_min_temp_c, device_max_temp_c,
             device_min_humidity_pct, device_max_humidity_pct,
-            battery_voltage_mv, rssi)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            battery_voltage_mv, rssi, reading_source, source_event_age_seconds, is_stale)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (ieee_address, now, reading_date, reading_time, temperature_c, humidity_pct, battery_pct, link_quality,
          zone, heating_int, boost_int, target_temp_c, heating_mode,
          device_min_temp_c, device_max_temp_c,
          device_min_humidity_pct, device_max_humidity_pct,
-         battery_voltage_mv, rssi),
+         battery_voltage_mv, rssi, reading_source, source_event_age_seconds, stale_int),
     )
     # Also touch the sensor's last_seen
     conn.execute(
         "UPDATE sensors SET last_seen = ? WHERE ieee_address = ?",
         (now, ieee_address),
+    )
+    conn.commit()
+
+
+def insert_zigbee_frame_event(
+    conn: sqlite3.Connection,
+    ieee_address: str,
+    friendly_name: str | None,
+    endpoint_id: int | None,
+    cluster_id: int | None,
+    attribute_id: int | None,
+    value_text: str | None,
+    aps_timestamp: str | None = None,
+    zigbee_sequence: int | None = None,
+    lqi: int | None = None,
+    rssi: int | None = None,
+    source: str | None = None,
+) -> None:
+    """Store a single Zigbee frame event for heartbeat/liveness diagnostics."""
+    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    conn.execute(
+        """
+        INSERT INTO zigbee_frame_events (
+            recorded_at, ieee_address, friendly_name, endpoint_id, cluster_id,
+            attribute_id, value_text, aps_timestamp, zigbee_sequence, lqi, rssi, source
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            now,
+            ieee_address,
+            friendly_name,
+            endpoint_id,
+            cluster_id,
+            attribute_id,
+            value_text,
+            aps_timestamp,
+            zigbee_sequence,
+            lqi,
+            rssi,
+            source,
+        ),
     )
     conn.commit()

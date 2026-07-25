@@ -18,6 +18,7 @@ Python application to monitor home temperature and humidity for heating analysis
 - 🏠 Heating zone mapping (Zone 1/2/3) for each sensor and thermostat
 - 🌐 Web API server for remote data access from Power BI
 - ➕ Secure web onboarding flow for adding one Zigbee sensor at a time
+- ❤️ Zigbee heartbeat telemetry and offline-risk detection on `/system`
 - 💾 SQLite database with automatic schema migrations
 - 📊 CSV and Excel export with per-sensor sheets
 
@@ -90,6 +91,8 @@ sudo systemctl edit sensor-data-api
 # Optional zigbee collector tuning (set in zigbee-sensor-reader override):
 # Environment=ZIGBEE_ACTIVE_POLL_ON_STALE_CACHE=0
 # Environment=ZIGBEE_STALE_AFTER_SECONDS=1800
+# Environment=ZIGBEE_PERIODIC_LOG_INTERVAL_SECONDS=900
+# Environment=ZIGBEE_HEARTBEAT_STALE_SECONDS=5400
 
 # Enable and start
 sudo systemctl enable --now zigbee-sensor-reader
@@ -162,6 +165,7 @@ Available endpoints:
 | `/api/readings?zone=Zone 1&format=csv` | Filter by zone |
 | `/api/readings?start=2026-01-01&end=2026-03-31&format=csv` | Filter by date |
 | `/api/readings/latest?format=csv` | Latest reading per sensor + freshness fields |
+| `/api/zigbee-heartbeat` | Per-sensor heartbeat summary (frame age/state) |
 | `/api/export/csv` | Download full CSV file |
 
 Onboarding-specific endpoints:
@@ -179,6 +183,18 @@ Onboarding-specific endpoints:
 4. Put one sensor into pairing mode.
 5. Confirm candidate IEEE/model and first reading (up to 5 minutes).
 6. Save friendly name + zone (writes to DB and `config.py`).
+
+## Zigbee heartbeat and 15-minute logging behavior
+
+- Sonoff battery sensors can stay at the same value for long periods.
+- The collector now records:
+  - frame heartbeat events in `zigbee_frame_events`
+  - measurement rows with provenance fields in `readings`:
+    - `reading_source` (`value_change`, `heartbeat_confirmed`, `active_poll_change`)
+    - `source_event_age_seconds`
+    - `is_stale`
+- Unchanged values are still written at 15-minute intervals **only when heartbeat is healthy**.
+- If heartbeat becomes stale, unchanged values are suppressed and `/system` flags the sensor as possible offline.
 
 ### Option 2: Export files
 

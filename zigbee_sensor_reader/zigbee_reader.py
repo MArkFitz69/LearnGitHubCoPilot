@@ -68,6 +68,7 @@ class SensorReading:
 # Callback type: called whenever a new reading arrives
 ReadingCallback = Callable[[SensorReading], None]
 DeviceJoinedCallback = Callable[[str, str | None], None]
+FrameEventCallback = Callable[[dict], None]
 
 
 class ZigbeeSensorListener:
@@ -82,9 +83,11 @@ class ZigbeeSensorListener:
         self,
         on_reading: ReadingCallback | None = None,
         on_device_joined: DeviceJoinedCallback | None = None,
+        on_frame_event: FrameEventCallback | None = None,
     ):
         self.on_reading = on_reading
         self.on_device_joined = on_device_joined
+        self.on_frame_event = on_frame_event
         self.app: ControllerApplication | None = None
         self._registered_clusters: set[tuple[str, int, int]] = set()
 
@@ -178,17 +181,43 @@ class ZigbeeSensorListener:
 
     # ── zigpy listener callbacks ──────────────────────────────────────
 
-    def _handle_attribute(self, cluster, attrid, value) -> None:
+    @staticmethod
+    def _extract_frame_metadata(args: tuple) -> dict:
+        """
+        Best-effort parse of zigpy callback extras.
+
+        zigpy callback signatures vary by version/adapter; we defensively scan
+        positional args for known metadata fields.
+        """
+        metadata: dict = {}
+        for arg in args:
+            if isinstance(arg, dict):
+                for key in ("timestamp", "aps_timestamp", "sequence", "seq", "lqi", "rssi", "source"):
+                    if key in arg and key not in metadata:
+                        metadata[key] = arg[key]
+                continue
+
+            # Dataclass/object-style metadata
+            for key in ("timestamp", "aps_timestamp", "sequence", "seq", "lqi", "rssi", "source"):
+                if key not in metadata and hasattr(arg, key):
+                    metadata[key] = getattr(arg, key)
+        return metadata
+
+    def _handle_attribute(self, cluster, attrid, value, args: tuple = ()) -> None:
         """Process an attribute report from a cluster listener."""
         device = cluster.endpoint.device
         ieee = str(device.ieee)
         friendly = SENSOR_NAMES.get(ieee, ieee)
         model = getattr(device, "model", None)
+        lqi = getattr(device, "lqi", None)
+        rssi = getattr(device, "rssi", None)
+        metadata = self._extract_frame_metadata(args)
 
         reading = SensorReading(
             ieee_address=ieee,
             friendly_name=friendly,
             model=model,
+            link_quality=lqi,
         )
 
         if cluster.cluster_id == TemperatureMeasurement.cluster_id:
@@ -209,6 +238,23 @@ class ZigbeeSensorListener:
 
         else:
             return  # Ignore clusters we don't care about
+
+        if self.on_frame_event:
+            self.on_frame_event(
+                {
+                    "ieee_address": ieee,
+                    "friendly_name": friendly,
+                    "endpoint_id": getattr(cluster.endpoint, "endpoint_id", None),
+                    "cluster_id": cluster.cluster_id,
+                    "attribute_id": attrid,
+                    "value_text": str(value),
+                    "aps_timestamp": metadata.get("aps_timestamp") or metadata.get("timestamp"),
+                    "zigbee_sequence": metadata.get("sequence") or metadata.get("seq"),
+                    "lqi": metadata.get("lqi", lqi),
+                    "rssi": metadata.get("rssi", rssi),
+                    "source": metadata.get("source", "report"),
+                }
+            )
 
         if self.on_reading:
             self.on_reading(reading)
@@ -241,7 +287,7 @@ class _ClusterListener:
 
     def attribute_updated(self, attrid, value, *args):
         """Called by zigpy when this cluster receives an attribute report."""
-        self.parent._handle_attribute(self.cluster, attrid, value)
+        self.parent._handle_attribute(self.cluster, attrid, value, args)
 
     def cluster_command(self, *args, **kwargs):
         pass

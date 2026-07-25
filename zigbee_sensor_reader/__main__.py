@@ -14,15 +14,23 @@ import asyncio
 import logging
 import sys
 import time
+from datetime import datetime
 
 from .config import (
     POLLING_INTERVAL,
     SENSOR_NAMES,
+    ZIGBEE_HEARTBEAT_STALE_SECONDS,
+    ZIGBEE_PERIODIC_LOG_INTERVAL_SECONDS,
     ZIGBEE_ACTIVE_POLL_INTERVAL,
     ZIGBEE_ACTIVE_POLL_ON_STALE_CACHE,
     ZONES,
 )
-from .database import get_connection, insert_reading, upsert_sensor
+from .database import (
+    get_connection,
+    insert_reading,
+    insert_zigbee_frame_event,
+    upsert_sensor,
+)
 from .export import export_to_csv, export_to_excel, get_sensor_summary
 from .onboarding import (
     fetch_pending_commands,
@@ -77,6 +85,40 @@ def _load_last_signatures(conn) -> dict[str, tuple]:
     }
 
 
+def _load_last_insert_timestamps(conn) -> dict[str, str]:
+    """Load latest reading timestamp per IEEE."""
+    rows = conn.execute(
+        """
+        SELECT ieee_address, MAX(timestamp) AS last_ts
+        FROM readings
+        GROUP BY ieee_address
+        """
+    ).fetchall()
+    return {row["ieee_address"]: row["last_ts"] for row in rows if row["last_ts"]}
+
+
+def _load_last_heartbeat_timestamps(conn) -> dict[str, str]:
+    """Load latest Zigbee frame timestamp per IEEE."""
+    rows = conn.execute(
+        """
+        SELECT ieee_address, MAX(recorded_at) AS last_frame_at
+        FROM zigbee_frame_events
+        GROUP BY ieee_address
+        """
+    ).fetchall()
+    return {row["ieee_address"]: row["last_frame_at"] for row in rows if row["last_frame_at"]}
+
+
+def _seconds_since(timestamp_iso: str | None) -> int | None:
+    if not timestamp_iso:
+        return None
+    try:
+        then = datetime.fromisoformat(timestamp_iso)
+    except ValueError:
+        return None
+    return max(0, int((datetime.now() - then).total_seconds()))
+
+
 def _get_sensor_metadata(conn, ieee_address: str):
     return conn.execute(
         "SELECT friendly_name, zone FROM sensors WHERE ieee_address = ?",
@@ -84,7 +126,13 @@ def _get_sensor_metadata(conn, ieee_address: str):
     ).fetchone()
 
 
-def handle_reading(reading, conn) -> None:
+def handle_reading(
+    reading,
+    conn,
+    reading_source: str | None = None,
+    source_event_age_seconds: int | None = None,
+    is_stale: bool | None = None,
+) -> None:
     """Process an incoming sensor reading: store in DB and print to console."""
     existing = _get_sensor_metadata(conn, reading.ieee_address)
     zone = ZONES.get(reading.ieee_address) or (existing["zone"] if existing else None)
@@ -112,6 +160,9 @@ def handle_reading(reading, conn) -> None:
         device_min_humidity_pct=getattr(reading, "device_min_humidity_pct", None),
         device_max_humidity_pct=getattr(reading, "device_max_humidity_pct", None),
         battery_voltage_mv=getattr(reading, "battery_voltage_mv", None),
+        reading_source=reading_source,
+        source_event_age_seconds=source_event_age_seconds,
+        is_stale=is_stale,
     )
     record_first_reading(conn, reading.ieee_address)
 
@@ -192,9 +243,50 @@ async def run_collector(pair: bool = False) -> None:
     for ieee, name in SENSOR_NAMES.items():
         upsert_sensor(conn, ieee_address=ieee, friendly_name=name, zone=ZONES.get(ieee))
 
+    last_signatures = _load_last_signatures(conn)
+    last_insert_timestamps = _load_last_insert_timestamps(conn)
+    last_heartbeat_timestamps = _load_last_heartbeat_timestamps(conn)
+
+    def _on_frame_event(event: dict) -> None:
+        try:
+            ieee_address = event.get("ieee_address")
+            if not ieee_address:
+                return
+            insert_zigbee_frame_event(
+                conn,
+                ieee_address=ieee_address,
+                friendly_name=event.get("friendly_name"),
+                endpoint_id=event.get("endpoint_id"),
+                cluster_id=event.get("cluster_id"),
+                attribute_id=event.get("attribute_id"),
+                value_text=event.get("value_text"),
+                aps_timestamp=event.get("aps_timestamp"),
+                zigbee_sequence=event.get("zigbee_sequence"),
+                lqi=event.get("lqi"),
+                rssi=event.get("rssi"),
+                source=event.get("source"),
+            )
+            last_heartbeat_timestamps[ieee_address] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        except Exception as exc:
+            logger.debug("Failed to store Zigbee frame event: %s", exc)
+
+    def _on_reading(reading) -> None:
+        heartbeat_age = _seconds_since(last_heartbeat_timestamps.get(reading.ieee_address))
+        is_stale = heartbeat_age is None or heartbeat_age > ZIGBEE_HEARTBEAT_STALE_SECONDS
+        handle_reading(
+            reading,
+            conn,
+            reading_source="value_change",
+            source_event_age_seconds=heartbeat_age,
+            is_stale=is_stale,
+        )
+        last_signatures[reading.ieee_address] = _reading_signature(reading)
+        last_insert_timestamps[reading.ieee_address] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
     listener = ZigbeeSensorListener(
-        on_reading=lambda reading: handle_reading(reading, conn),
+        on_reading=_on_reading,
         on_device_joined=lambda ieee, model: _handle_device_joined(conn, ieee, model),
+        on_frame_event=_on_frame_event,
     )
 
     try:
@@ -216,7 +308,6 @@ async def run_collector(pair: bool = False) -> None:
 
         next_sensor_poll = 0.0
         next_forced_poll = 0.0
-        last_signatures = _load_last_signatures(conn)
         while True:
             await _process_onboarding_commands(listener, conn)
 
@@ -233,20 +324,52 @@ async def run_collector(pair: bool = False) -> None:
                 cached = read_cached_sensors(listener.app)
                 stored = 0
                 skipped = 0
+                periodic = 0
+                stale_skipped = 0
                 for reading in cached:
                     signature = _reading_signature(reading)
                     previous = last_signatures.get(reading.ieee_address)
-                    if previous == signature:
-                        skipped += 1
+                    heartbeat_age = _seconds_since(last_heartbeat_timestamps.get(reading.ieee_address))
+                    heartbeat_ok = heartbeat_age is not None and heartbeat_age <= ZIGBEE_HEARTBEAT_STALE_SECONDS
+                    is_stale = not heartbeat_ok
+
+                    if previous != signature:
+                        handle_reading(
+                            reading,
+                            conn,
+                            reading_source="value_change",
+                            source_event_age_seconds=heartbeat_age,
+                            is_stale=is_stale,
+                        )
+                        last_signatures[reading.ieee_address] = signature
+                        last_insert_timestamps[reading.ieee_address] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+                        stored += 1
                         continue
-                    handle_reading(reading, conn)
-                    last_signatures[reading.ieee_address] = signature
-                    stored += 1
+
+                    skipped += 1
+                    elapsed = _seconds_since(last_insert_timestamps.get(reading.ieee_address))
+                    if elapsed is None or elapsed < ZIGBEE_PERIODIC_LOG_INTERVAL_SECONDS:
+                        continue
+
+                    if heartbeat_ok:
+                        handle_reading(
+                            reading,
+                            conn,
+                            reading_source="heartbeat_confirmed",
+                            source_event_age_seconds=heartbeat_age,
+                            is_stale=False,
+                        )
+                        last_insert_timestamps[reading.ieee_address] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+                        periodic += 1
+                    else:
+                        stale_skipped += 1
                 if cached:
                     logger.info(
-                        "Stored %d Zigbee sensor readings (changed), skipped %d unchanged cached",
+                        "Stored %d Zigbee sensor readings (changed), stored %d heartbeat-confirmed, skipped %d unchanged cached, stale-suppressed %d",
                         stored,
+                        periodic,
                         skipped,
+                        stale_skipped,
                     )
 
                 # If every cached sensor is unchanged for this cycle, attempt an
@@ -269,8 +392,17 @@ async def run_collector(pair: bool = False) -> None:
                         previous = last_signatures.get(reading.ieee_address)
                         if previous == signature:
                             continue
-                        handle_reading(reading, conn)
+                        heartbeat_age = _seconds_since(last_heartbeat_timestamps.get(reading.ieee_address))
+                        is_stale = heartbeat_age is None or heartbeat_age > ZIGBEE_HEARTBEAT_STALE_SECONDS
+                        handle_reading(
+                            reading,
+                            conn,
+                            reading_source="active_poll_change",
+                            source_event_age_seconds=heartbeat_age,
+                            is_stale=is_stale,
+                        )
                         last_signatures[reading.ieee_address] = signature
+                        last_insert_timestamps[reading.ieee_address] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
                         forced_stored += 1
 
                     next_forced_poll = time.monotonic() + ZIGBEE_ACTIVE_POLL_INTERVAL
