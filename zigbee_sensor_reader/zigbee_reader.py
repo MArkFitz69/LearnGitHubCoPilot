@@ -274,7 +274,11 @@ async def poll_sensors(app: ControllerApplication) -> list[SensorReading]:
             if TemperatureMeasurement.cluster_id in endpoint.in_clusters:
                 cluster = endpoint.in_clusters[TemperatureMeasurement.cluster_id]
                 try:
-                    result = await cluster.read_attributes(["measured_value"])
+                    result = await cluster.read_attributes(
+                        ["measured_value"],
+                        allow_cache=False,
+                        only_cache=False,
+                    )
                     val = result[0].get("measured_value")
                     if val is not None:
                         reading.temperature_c = val / 100.0
@@ -285,7 +289,11 @@ async def poll_sensors(app: ControllerApplication) -> list[SensorReading]:
             if RelativeHumidity.cluster_id in endpoint.in_clusters:
                 cluster = endpoint.in_clusters[RelativeHumidity.cluster_id]
                 try:
-                    result = await cluster.read_attributes(["measured_value"])
+                    result = await cluster.read_attributes(
+                        ["measured_value"],
+                        allow_cache=False,
+                        only_cache=False,
+                    )
                     val = result[0].get("measured_value")
                     if val is not None:
                         reading.humidity_pct = val / 100.0
@@ -296,7 +304,11 @@ async def poll_sensors(app: ControllerApplication) -> list[SensorReading]:
             if PowerConfiguration.cluster_id in endpoint.in_clusters:
                 cluster = endpoint.in_clusters[PowerConfiguration.cluster_id]
                 try:
-                    result = await cluster.read_attributes(["battery_percentage_remaining"])
+                    result = await cluster.read_attributes(
+                        ["battery_percentage_remaining"],
+                        allow_cache=False,
+                        only_cache=False,
+                    )
                     val = result[0].get("battery_percentage_remaining")
                     if val is not None:
                         reading.battery_pct = val / 2.0

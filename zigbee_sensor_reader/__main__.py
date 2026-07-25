@@ -36,6 +36,41 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _reading_signature(reading) -> tuple:
+    """Build a comparable value signature for de-duplicating cached readings."""
+    return (
+        reading.temperature_c,
+        reading.humidity_pct,
+        reading.battery_pct,
+    )
+
+
+def _load_last_signatures(conn) -> dict[str, tuple]:
+    """Load the latest stored value signature per IEEE from the database."""
+    rows = conn.execute(
+        """
+        SELECT r.ieee_address,
+               r.temperature_c,
+               r.humidity_pct,
+               r.battery_pct
+        FROM readings r
+        JOIN (
+            SELECT ieee_address, MAX(id) AS max_id
+            FROM readings
+            GROUP BY ieee_address
+        ) latest ON latest.max_id = r.id
+        """
+    ).fetchall()
+    return {
+        row["ieee_address"]: (
+            row["temperature_c"],
+            row["humidity_pct"],
+            row["battery_pct"],
+        )
+        for row in rows
+    }
+
+
 def _get_sensor_metadata(conn, ieee_address: str):
     return conn.execute(
         "SELECT friendly_name, zone FROM sensors WHERE ieee_address = ?",
@@ -174,6 +209,9 @@ async def run_collector(pair: bool = False) -> None:
         )
 
         next_sensor_poll = 0.0
+        next_forced_poll = 0.0
+        forced_poll_interval = max(POLLING_INTERVAL * 4, 1800)
+        last_signatures = _load_last_signatures(conn)
         while True:
             await _process_onboarding_commands(listener, conn)
 
@@ -188,10 +226,52 @@ async def run_collector(pair: bool = False) -> None:
             try:
                 from .zigbee_reader import read_cached_sensors
                 cached = read_cached_sensors(listener.app)
+                stored = 0
+                skipped = 0
                 for reading in cached:
+                    signature = _reading_signature(reading)
+                    previous = last_signatures.get(reading.ieee_address)
+                    if previous == signature:
+                        skipped += 1
+                        continue
                     handle_reading(reading, conn)
+                    last_signatures[reading.ieee_address] = signature
+                    stored += 1
                 if cached:
-                    logger.info("Stored %d Zigbee sensor readings (cached)", len(cached))
+                    logger.info(
+                        "Stored %d Zigbee sensor readings (changed), skipped %d unchanged cached",
+                        stored,
+                        skipped,
+                    )
+
+                # If every cached sensor is unchanged for this cycle, attempt an
+                # active network read (throttled) to refresh potentially stale cache.
+                if (
+                    cached
+                    and skipped == len(cached)
+                    and now >= next_forced_poll
+                ):
+                    from .zigbee_reader import poll_sensors
+
+                    forced_checked = 0
+                    forced_stored = 0
+                    active_readings = await poll_sensors(listener.app)
+                    for reading in active_readings:
+                        forced_checked += 1
+                        signature = _reading_signature(reading)
+                        previous = last_signatures.get(reading.ieee_address)
+                        if previous == signature:
+                            continue
+                        handle_reading(reading, conn)
+                        last_signatures[reading.ieee_address] = signature
+                        forced_stored += 1
+
+                    next_forced_poll = time.monotonic() + forced_poll_interval
+                    logger.info(
+                        "Forced Zigbee poll checked %d sensors, stored %d changed readings",
+                        forced_checked,
+                        forced_stored,
+                    )
             except Exception as e:
                 logger.debug("Zigbee cache read failed: %s", e)
 
