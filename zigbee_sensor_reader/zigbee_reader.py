@@ -19,6 +19,7 @@ from zigpy.zcl.clusters.measurement import (
     TemperatureMeasurement,
 )
 from zigpy.zcl.clusters.general import PowerConfiguration
+from zigpy.zcl.clusters.general import Basic
 
 from .config import DEVICE_PATH, SERIAL_BAUDRATE, FLOW_CONTROL, SENSOR_NAMES
 
@@ -141,6 +142,7 @@ class ZigbeeSensorListener:
 
     def _register_device_cluster_listeners(self, ieee: str, device) -> None:
         target_clusters = (
+            Basic.cluster_id,
             TemperatureMeasurement.cluster_id,
             RelativeHumidity.cluster_id,
             PowerConfiguration.cluster_id,
@@ -213,6 +215,23 @@ class ZigbeeSensorListener:
         rssi = getattr(device, "rssi", None)
         metadata = self._extract_frame_metadata(args)
 
+        if self.on_frame_event:
+            self.on_frame_event(
+                {
+                    "ieee_address": ieee,
+                    "friendly_name": friendly,
+                    "endpoint_id": getattr(cluster.endpoint, "endpoint_id", None),
+                    "cluster_id": cluster.cluster_id,
+                    "attribute_id": attrid,
+                    "value_text": str(value),
+                    "aps_timestamp": metadata.get("aps_timestamp") or metadata.get("timestamp"),
+                    "zigbee_sequence": metadata.get("sequence") or metadata.get("seq"),
+                    "lqi": metadata.get("lqi", lqi),
+                    "rssi": metadata.get("rssi", rssi),
+                    "source": metadata.get("source", "report"),
+                }
+            )
+
         reading = SensorReading(
             ieee_address=ieee,
             friendly_name=friendly,
@@ -237,24 +256,7 @@ class ZigbeeSensorListener:
             logger.info("%s battery: %.0f%%", friendly, reading.battery_pct)
 
         else:
-            return  # Ignore clusters we don't care about
-
-        if self.on_frame_event:
-            self.on_frame_event(
-                {
-                    "ieee_address": ieee,
-                    "friendly_name": friendly,
-                    "endpoint_id": getattr(cluster.endpoint, "endpoint_id", None),
-                    "cluster_id": cluster.cluster_id,
-                    "attribute_id": attrid,
-                    "value_text": str(value),
-                    "aps_timestamp": metadata.get("aps_timestamp") or metadata.get("timestamp"),
-                    "zigbee_sequence": metadata.get("sequence") or metadata.get("seq"),
-                    "lqi": metadata.get("lqi", lqi),
-                    "rssi": metadata.get("rssi", rssi),
-                    "source": metadata.get("source", "report"),
-                }
-            )
+            return  # Non-measurement frames are recorded for heartbeat only.
 
         if self.on_reading:
             self.on_reading(reading)

@@ -246,8 +246,10 @@ async def run_collector(pair: bool = False) -> None:
     last_signatures = _load_last_signatures(conn)
     last_insert_timestamps = _load_last_insert_timestamps(conn)
     last_heartbeat_timestamps = _load_last_heartbeat_timestamps(conn)
+    heartbeat_bootstrap_mode = len(last_heartbeat_timestamps) == 0
 
     def _on_frame_event(event: dict) -> None:
+        nonlocal heartbeat_bootstrap_mode
         try:
             ieee_address = event.get("ieee_address")
             if not ieee_address:
@@ -267,6 +269,7 @@ async def run_collector(pair: bool = False) -> None:
                 source=event.get("source"),
             )
             last_heartbeat_timestamps[ieee_address] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            heartbeat_bootstrap_mode = False
         except Exception as exc:
             logger.debug("Failed to store Zigbee frame event: %s", exc)
 
@@ -291,6 +294,18 @@ async def run_collector(pair: bool = False) -> None:
 
     try:
         await listener.start()
+        # Ensure all currently known Zigbee devices are present in the registry,
+        # including non-sensor routers (e.g. smart plugs) that may not emit
+        # temperature/humidity readings.
+        for ieee, device in listener.app.devices.items():
+            ieee_str = str(ieee)
+            upsert_sensor(
+                conn,
+                ieee_address=ieee_str,
+                friendly_name=SENSOR_NAMES.get(ieee_str),
+                model=getattr(device, "model", None),
+                zone=ZONES.get(ieee_str),
+            )
 
         if pair:
             logger.info(
@@ -330,7 +345,15 @@ async def run_collector(pair: bool = False) -> None:
                     signature = _reading_signature(reading)
                     previous = last_signatures.get(reading.ieee_address)
                     heartbeat_age = _seconds_since(last_heartbeat_timestamps.get(reading.ieee_address))
-                    heartbeat_ok = heartbeat_age is not None and heartbeat_age <= ZIGBEE_HEARTBEAT_STALE_SECONDS
+                    bootstrap_age = _seconds_since(last_insert_timestamps.get(reading.ieee_address))
+                    heartbeat_ok = (
+                        (heartbeat_age is not None and heartbeat_age <= ZIGBEE_HEARTBEAT_STALE_SECONDS)
+                        or (
+                            heartbeat_bootstrap_mode
+                            and bootstrap_age is not None
+                            and bootstrap_age <= ZIGBEE_HEARTBEAT_STALE_SECONDS
+                        )
+                    )
                     is_stale = not heartbeat_ok
 
                     if previous != signature:

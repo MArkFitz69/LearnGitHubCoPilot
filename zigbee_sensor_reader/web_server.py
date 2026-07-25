@@ -56,6 +56,7 @@ app = Flask(__name__)
 
 FRESHNESS_AGING_AFTER_SECONDS = int(os.environ.get("ZIGBEE_AGING_AFTER_SECONDS", "900"))
 FRESHNESS_STALE_AFTER_SECONDS = int(os.environ.get("ZIGBEE_STALE_AFTER_SECONDS", "1800"))
+HEARTBEAT_BOOTSTRAP_MINUTES = int(os.environ.get("ZIGBEE_HEARTBEAT_BOOTSTRAP_MINUTES", "120"))
 
 
 def get_db() -> sqlite3.Connection:
@@ -360,6 +361,7 @@ def _get_system_info() -> dict:
                 FROM zigbee_frame_events GROUP BY ieee_address
             )
             SELECT
+                s.ieee_address,
                 s.friendly_name,
                 s.model,
                 s.zone,
@@ -376,11 +378,15 @@ def _get_system_info() -> dict:
         for row in sensor_status:
             item = dict(row)
             frame_age = item.get("frame_mins_ago")
+            reading_age = item.get("mins_ago")
             model = (item.get("model") or "").lower()
             is_sonoff = model.startswith("snzb-02")
             if is_sonoff:
                 if frame_age is None:
-                    heartbeat_state = "no-heartbeat"
+                    if reading_age is not None and reading_age <= HEARTBEAT_BOOTSTRAP_MINUTES:
+                        heartbeat_state = "bootstrapping"
+                    else:
+                        heartbeat_state = "no-heartbeat"
                 elif frame_age <= 60:
                     heartbeat_state = "ok"
                 elif frame_age <= 90:
@@ -763,13 +769,14 @@ def system_page():
 
 <h2>&#128268; Sensor Health</h2>
 <table>
-  <thead><tr><th>Sensor</th><th>Model</th><th>Zone</th><th>Last reading</th><th>Reading age</th><th>Last heartbeat</th><th>Heartbeat age</th><th>Status</th></tr></thead>
+  <thead><tr><th>Sensor</th><th>IEEE</th><th>Model</th><th>Zone</th><th>Last reading</th><th>Reading age</th><th>Last heartbeat</th><th>Heartbeat age</th><th>Status</th></tr></thead>
   <tbody>
   {% for s in sensors %}
   {% set m = s.mins_ago %}
   {% set hm = s.frame_mins_ago %}
   <tr class="{{ 'down' if s.possible_offline else ('stale' if m is not none and m > 60 else '') }}">
-    <td>{{ s.friendly_name or "-" }}</td>
+    <td>{{ s.friendly_name or s.ieee_address or "-" }}</td>
+    <td><code style="font-size:.8em">{{ s.ieee_address or "-" }}</code></td>
     <td style="color:#777;font-size:.82em">{{ s.model or "-" }}</td>
     <td>{{ s.zone or "-" }}</td>
     <td style="font-size:.85em">{{ s.last_ts or "never" }}</td>
@@ -785,6 +792,8 @@ def system_page():
         <span class="err">&#10007; possible offline (heartbeat stale)</span>
       {% elif s.heartbeat_state == 'no-heartbeat' %}
         <span class="err">&#10007; possible offline (no heartbeat)</span>
+      {% elif s.heartbeat_state == 'bootstrapping' %}
+        <span class="warn">&#9888; heartbeat bootstrapping</span>
       {% elif m is none %}
         <span class="warn">no data</span>
       {% elif m > 120 %}
@@ -1498,6 +1507,7 @@ def api_zigbee_heartbeat():
             l.last_frame_at,
             COALESCE(f.frames_last_1h, 0) AS frames_last_1h,
             CAST((julianday('now','localtime') - julianday(l.last_frame_at)) * 1440 AS INTEGER) AS frame_mins_ago,
+            CAST((julianday('now','localtime') - julianday(r.last_ts)) * 1440 AS INTEGER) AS mins_ago,
             (
                 SELECT zfe.cluster_id
                 FROM zigbee_frame_events zfe
@@ -1522,6 +1532,11 @@ def api_zigbee_heartbeat():
         FROM sensors s
         LEFT JOIN latest l ON l.ieee_address = s.ieee_address
         LEFT JOIN frames_1h f ON f.ieee_address = s.ieee_address
+        LEFT JOIN (
+            SELECT ieee_address, MAX(timestamp) AS last_ts
+            FROM readings
+            GROUP BY ieee_address
+        ) r ON r.ieee_address = s.ieee_address
         ORDER BY s.zone, s.friendly_name
         """
     ).fetchall()
@@ -1532,9 +1547,13 @@ def api_zigbee_heartbeat():
         item = dict(row)
         model = (item.get("model") or "").lower()
         frame_age = item.get("frame_mins_ago")
+        reading_age = item.get("mins_ago")
         if model.startswith("snzb-02"):
             if frame_age is None:
-                state = "no-heartbeat"
+                if reading_age is not None and reading_age <= HEARTBEAT_BOOTSTRAP_MINUTES:
+                    state = "bootstrapping"
+                else:
+                    state = "no-heartbeat"
             elif frame_age <= 60:
                 state = "ok"
             elif frame_age <= 90:
