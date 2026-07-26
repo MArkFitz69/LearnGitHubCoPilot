@@ -11,6 +11,12 @@ Restart=always
 RestartSec=10
 Environment=ZIGBEE_HOST=192.168.1.59
 Environment=ZIGBEE_PORT=6638
+Environment=ZIGBEE_BACKEND=direct
+Environment=Z2M_MQTT_HOST=home-logger.local
+Environment=Z2M_MQTT_PORT=1883
+# Optional MQTT auth when ZIGBEE_BACKEND=z2m:
+# Environment=Z2M_MQTT_USERNAME=your-mqtt-username
+# Environment=Z2M_MQTT_PASSWORD=your-mqtt-password
 Environment=HIVE_USERNAME=your-hive-email@example.com
 Environment=HIVE_PASSWORD=your-hive-password
 # Shelly BLE scan window (seconds) — sensor advertises every 3-10 mins

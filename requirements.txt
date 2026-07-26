@@ -4,6 +4,7 @@ uvicorn
 # Zigbee sensor reader dependencies
 zigpy>=0.64.0
 bellows>=0.39.0
+paho-mqtt>=2.1.0
 openpyxl>=3.1.0
 
 # Hive thermostat integration

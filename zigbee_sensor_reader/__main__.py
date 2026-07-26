@@ -19,6 +19,7 @@ from datetime import datetime
 from .config import (
     POLLING_INTERVAL,
     SENSOR_NAMES,
+    ZIGBEE_BACKEND,
     ZIGBEE_HEARTBEAT_STALE_SECONDS,
     ZIGBEE_PERIODIC_LOG_INTERVAL_SECONDS,
     ZIGBEE_ACTIVE_POLL_INTERVAL,
@@ -233,11 +234,9 @@ async def _process_onboarding_commands(listener, conn) -> None:
 
 async def run_collector(pair: bool = False) -> None:
     """Run the main data collection loop."""
-    # Import Zigbee dependencies only when actually collecting data
-    from .zigbee_reader import ZigbeeSensorListener
-
     conn = get_connection()
     logger.info("Database ready at %s", conn.execute("PRAGMA database_list").fetchone()[2])
+    logger.info("Zigbee backend mode: %s", ZIGBEE_BACKEND)
 
     # Register any pre-configured sensor names
     for ieee, name in SENSOR_NAMES.items():
@@ -286,26 +285,62 @@ async def run_collector(pair: bool = False) -> None:
         last_signatures[reading.ieee_address] = _reading_signature(reading)
         last_insert_timestamps[reading.ieee_address] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
-    listener = ZigbeeSensorListener(
-        on_reading=_on_reading,
-        on_device_joined=lambda ieee, model: _handle_device_joined(conn, ieee, model),
-        on_frame_event=_on_frame_event,
-    )
+    if ZIGBEE_BACKEND == "z2m":
+        from .zigbee2mqtt_reader import Zigbee2MqttListener
+
+        listener = Zigbee2MqttListener()
+        using_z2m = True
+    else:
+        from .zigbee_reader import ZigbeeSensorListener
+
+        listener = ZigbeeSensorListener(
+            on_reading=_on_reading,
+            on_device_joined=lambda ieee, model: _handle_device_joined(conn, ieee, model),
+            on_frame_event=_on_frame_event,
+        )
+        using_z2m = False
+
+    def _drain_z2m_events() -> None:
+        if not using_z2m:
+            return
+        for event_type, payload in listener.drain_events():
+            if event_type == "device":
+                ieee = payload.get("ieee_address")
+                if not ieee:
+                    continue
+                upsert_sensor(
+                    conn,
+                    ieee_address=ieee,
+                    friendly_name=payload.get("friendly_name"),
+                    model=payload.get("model"),
+                    zone=ZONES.get(ieee),
+                )
+                continue
+            if event_type == "frame":
+                _on_frame_event(payload)
+                continue
+            if event_type == "reading":
+                reading = payload.get("reading")
+                if reading:
+                    _on_reading(reading)
 
     try:
         await listener.start()
-        # Ensure all currently known Zigbee devices are present in the registry,
-        # including non-sensor routers (e.g. smart plugs) that may not emit
-        # temperature/humidity readings.
-        for ieee, device in listener.app.devices.items():
-            ieee_str = str(ieee)
-            upsert_sensor(
-                conn,
-                ieee_address=ieee_str,
-                friendly_name=SENSOR_NAMES.get(ieee_str),
-                model=getattr(device, "model", None),
-                zone=ZONES.get(ieee_str),
-            )
+        if using_z2m:
+            _drain_z2m_events()
+        else:
+            # Ensure all currently known Zigbee devices are present in the registry,
+            # including non-sensor routers (e.g. smart plugs) that may not emit
+            # temperature/humidity readings.
+            for ieee, device in listener.app.devices.items():
+                ieee_str = str(ieee)
+                upsert_sensor(
+                    conn,
+                    ieee_address=ieee_str,
+                    friendly_name=SENSOR_NAMES.get(ieee_str),
+                    model=getattr(device, "model", None),
+                    zone=ZONES.get(ieee_str),
+                )
 
         if pair:
             logger.info(
@@ -324,6 +359,7 @@ async def run_collector(pair: bool = False) -> None:
         next_sensor_poll = 0.0
         next_forced_poll = 0.0
         while True:
+            _drain_z2m_events()
             await _process_onboarding_commands(listener, conn)
 
             now = time.monotonic()
@@ -335,8 +371,12 @@ async def run_collector(pair: bool = False) -> None:
 
             # Read cached Zigbee sensor values and store them
             try:
-                from .zigbee_reader import read_cached_sensors
-                cached = read_cached_sensors(listener.app)
+                if using_z2m:
+                    cached = listener.read_cached_sensors()
+                else:
+                    from .zigbee_reader import read_cached_sensors
+
+                    cached = read_cached_sensors(listener.app)
                 stored = 0
                 skipped = 0
                 periodic = 0
@@ -398,6 +438,8 @@ async def run_collector(pair: bool = False) -> None:
                 # If every cached sensor is unchanged for this cycle, attempt an
                 # active network read (throttled) to refresh potentially stale cache.
                 if (
+                    not using_z2m
+                    and
                     ZIGBEE_ACTIVE_POLL_ON_STALE_CACHE
                     and
                     cached

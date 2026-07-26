@@ -6,7 +6,7 @@ Python application to monitor home temperature and humidity for heating analysis
 
 | Source | Protocol | Data Collected |
 |--------|----------|----------------|
-| **Sonoff SNZB-02D/DR2** sensors | Zigbee via Dongle-M | Temperature, humidity, battery |
+| **Sonoff SNZB-02D/DR2** sensors | Zigbee via Dongle-M (direct EZSP) **or** Zigbee2MQTT (MQTT) | Temperature, humidity, battery |
 | **Hive thermostats** | Cloud API | Temperature, target, heating on/off, boost, mode |
 | **Shelly Blu H&T** | Bluetooth (BLE) | Temperature, humidity, battery |
 
@@ -195,6 +195,41 @@ Onboarding-specific endpoints:
     - `is_stale`
 - Unchanged values are still written at 15-minute intervals **only when heartbeat is healthy**.
 - If heartbeat becomes stale, unchanged values are suppressed and `/system` flags the sensor as possible offline.
+
+## Zigbee2MQTT mode (MQTT ingestion)
+
+Set `ZIGBEE_BACKEND=z2m` to ingest Sonoff telemetry from Zigbee2MQTT MQTT topics instead of direct EZSP/TCP.
+
+Recommended service environment:
+
+```ini
+Environment=ZIGBEE_BACKEND=z2m
+Environment=Z2M_MQTT_HOST=home-logger.local
+Environment=Z2M_MQTT_PORT=1883
+Environment=Z2M_MQTT_TOPIC_PREFIX=zigbee2mqtt
+# Optional:
+# Environment=Z2M_MQTT_USERNAME=...
+# Environment=Z2M_MQTT_PASSWORD=...
+```
+
+Notes:
+- Hive and Shelly collectors remain unchanged.
+- Sonoff 15-minute logging behavior remains unchanged.
+- Keep `ZIGBEE_BACKEND=direct` available for immediate rollback.
+
+## Syncing your existing names into Zigbee2MQTT
+
+Preferred: rename in Zigbee2MQTT frontend after matching each device by IEEE.
+
+MQTT bridge option (example):
+
+```bash
+mosquitto_pub -h home-logger.local -p 1883 \
+  -t zigbee2mqtt/bridge/request/device/rename \
+  -m '{"from":"0x00124b0025e7a1c3","to":"Living Room"}'
+```
+
+Repeat for each device so Zigbee2MQTT `friendly_name` matches the names already used in this project.
 
 ### Option 2: Export files
 

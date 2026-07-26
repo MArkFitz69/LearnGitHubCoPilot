@@ -38,7 +38,15 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template_string, request
 
-from .config import DATABASE_PATH, SHELLY_SENSORS, ZIGBEE_HOST, ZIGBEE_PORT
+from .config import (
+    DATABASE_PATH,
+    SHELLY_SENSORS,
+    Z2M_MQTT_HOST,
+    Z2M_MQTT_PORT,
+    ZIGBEE_BACKEND,
+    ZIGBEE_HOST,
+    ZIGBEE_PORT,
+)
 from .database import get_connection
 from .onboarding import (
     create_temp_passcode,
@@ -57,6 +65,7 @@ app = Flask(__name__)
 FRESHNESS_AGING_AFTER_SECONDS = int(os.environ.get("ZIGBEE_AGING_AFTER_SECONDS", "900"))
 FRESHNESS_STALE_AFTER_SECONDS = int(os.environ.get("ZIGBEE_STALE_AFTER_SECONDS", "1800"))
 HEARTBEAT_BOOTSTRAP_MINUTES = int(os.environ.get("ZIGBEE_HEARTBEAT_BOOTSTRAP_MINUTES", "120"))
+HEARTBEAT_BOOTSTRAP_CAP_MINUTES = 30
 
 
 def get_db() -> sqlite3.Connection:
@@ -72,6 +81,12 @@ def get_db_write() -> sqlite3.Connection:
 
 
 def _check_dongle_tcp() -> tuple[bool, str]:
+    if ZIGBEE_BACKEND == "z2m":
+        try:
+            with socket.create_connection((Z2M_MQTT_HOST, Z2M_MQTT_PORT), timeout=3):
+                return True, f"mqtt:{Z2M_MQTT_HOST}:{Z2M_MQTT_PORT}"
+        except OSError as exc:
+            return False, f"mqtt:{exc}"
     try:
         with socket.create_connection((ZIGBEE_HOST, ZIGBEE_PORT), timeout=3):
             return True, "connected"
@@ -139,6 +154,29 @@ def _freshness_state(age_seconds: int | None) -> str:
         return "fresh"
     if age_seconds <= FRESHNESS_STALE_AFTER_SECONDS:
         return "aging"
+    return "stale"
+
+
+def _heartbeat_state_for_row(
+    model: str | None,
+    frame_age_minutes: int | None,
+    reading_age_minutes: int | None,
+) -> str:
+    """Classify heartbeat state for Sonoff sensors from reading/frame ages."""
+    model_text = (model or "").lower()
+    if not model_text.startswith("snzb-02"):
+        return "n/a"
+
+    if frame_age_minutes is None:
+        bootstrap_window = min(HEARTBEAT_BOOTSTRAP_MINUTES, HEARTBEAT_BOOTSTRAP_CAP_MINUTES)
+        if reading_age_minutes is not None and reading_age_minutes < bootstrap_window:
+            return "bootstrapping"
+        return "no-heartbeat"
+
+    if frame_age_minutes <= 60:
+        return "ok"
+    if frame_age_minutes <= 90:
+        return "quiet"
     return "stale"
 
 
@@ -379,22 +417,11 @@ def _get_system_info() -> dict:
             item = dict(row)
             frame_age = item.get("frame_mins_ago")
             reading_age = item.get("mins_ago")
-            model = (item.get("model") or "").lower()
-            is_sonoff = model.startswith("snzb-02")
-            if is_sonoff:
-                if frame_age is None:
-                    if reading_age is not None and reading_age <= HEARTBEAT_BOOTSTRAP_MINUTES:
-                        heartbeat_state = "bootstrapping"
-                    else:
-                        heartbeat_state = "no-heartbeat"
-                elif frame_age <= 60:
-                    heartbeat_state = "ok"
-                elif frame_age <= 90:
-                    heartbeat_state = "quiet"
-                else:
-                    heartbeat_state = "stale"
-            else:
-                heartbeat_state = "n/a"
+            heartbeat_state = _heartbeat_state_for_row(
+                item.get("model"),
+                frame_age,
+                reading_age,
+            )
             item["heartbeat_state"] = heartbeat_state
             item["possible_offline"] = heartbeat_state in {"stale", "no-heartbeat"}
             statuses.append(item)
@@ -1545,23 +1572,11 @@ def api_zigbee_heartbeat():
     data = []
     for row in rows:
         item = dict(row)
-        model = (item.get("model") or "").lower()
-        frame_age = item.get("frame_mins_ago")
-        reading_age = item.get("mins_ago")
-        if model.startswith("snzb-02"):
-            if frame_age is None:
-                if reading_age is not None and reading_age <= HEARTBEAT_BOOTSTRAP_MINUTES:
-                    state = "bootstrapping"
-                else:
-                    state = "no-heartbeat"
-            elif frame_age <= 60:
-                state = "ok"
-            elif frame_age <= 90:
-                state = "quiet"
-            else:
-                state = "stale"
-        else:
-            state = "n/a"
+        state = _heartbeat_state_for_row(
+            item.get("model"),
+            item.get("frame_mins_ago"),
+            item.get("mins_ago"),
+        )
         item["heartbeat_state"] = state
         data.append(item)
     return jsonify(data)

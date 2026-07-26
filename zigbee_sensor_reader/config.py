@@ -11,6 +11,11 @@ Edit these settings to match your setup:
 
 import os
 
+# Zigbee backend selector:
+# - "direct": existing bellows/EZSP TCP serial path to Dongle-M
+# - "z2m":    consume Sonoff telemetry from Zigbee2MQTT over MQTT
+ZIGBEE_BACKEND = os.environ.get("ZIGBEE_BACKEND", "direct").strip().lower()
+
 # Network connection for the Sonoff Zigbee Dongle-M (Ethernet)
 # The dongle exposes a TCP serial socket on the network
 ZIGBEE_HOST = os.environ.get("ZIGBEE_HOST", "192.168.1.59")
@@ -29,6 +34,14 @@ RADIO_TYPE = "ezsp"
 
 # Hardware flow control (RTS/CTS) — disabled for this dongle
 FLOW_CONTROL = False
+
+# Zigbee2MQTT / MQTT settings (used when ZIGBEE_BACKEND=z2m)
+Z2M_MQTT_HOST = os.environ.get("Z2M_MQTT_HOST", "home-logger.local")
+Z2M_MQTT_PORT = int(os.environ.get("Z2M_MQTT_PORT", "1883"))
+Z2M_MQTT_USERNAME = os.environ.get("Z2M_MQTT_USERNAME")
+Z2M_MQTT_PASSWORD = os.environ.get("Z2M_MQTT_PASSWORD")
+Z2M_MQTT_TOPIC_PREFIX = os.environ.get("Z2M_MQTT_TOPIC_PREFIX", "zigbee2mqtt").strip("/") or "zigbee2mqtt"
+Z2M_MQTT_CLIENT_ID = os.environ.get("Z2M_MQTT_CLIENT_ID", "zigbee-sensor-reader")
 
 # Database configuration
 DATABASE_PATH = os.environ.get(
