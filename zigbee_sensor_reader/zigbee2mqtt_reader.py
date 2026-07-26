@@ -53,6 +53,7 @@ class Zigbee2MqttListener:
         self._lock = threading.Lock()
         self._latest_by_ieee: dict[str, MqttSensorReading] = {}
         self._device_by_friendly: dict[str, dict[str, str | None]] = {}
+        self._requested_snapshots: set[str] = set()
         self._client = None
         self._connected = False
         self._last_message_at: str | None = None
@@ -158,6 +159,26 @@ class Zigbee2MqttListener:
                     },
                 )
             )
+            # Proactively request current state so dashboard/status are refreshed
+            # even if retained device telemetry is disabled in Zigbee2MQTT.
+            if model and model.startswith("SNZB-02") and display_name and display_name not in self._requested_snapshots:
+                self._requested_snapshots.add(display_name)
+                if self._client:
+                    self._client.publish(
+                        f"{self.topic_prefix}/{display_name}/get",
+                        payload=json.dumps(
+                            {
+                                "temperature": "",
+                                "humidity": "",
+                                "battery": "",
+                                "voltage": "",
+                                "linkquality": "",
+                            }
+                        ),
+                        qos=0,
+                        retain=False,
+                    )
+                    logger.info("Requested initial Zigbee2MQTT snapshot for %s", display_name)
         self._device_by_friendly.update(mapped)
 
     def _on_connect(self, client, _userdata, _flags, reason_code, _properties=None) -> None:
@@ -174,6 +195,12 @@ class Zigbee2MqttListener:
         logger.info("Connected to Zigbee2MQTT broker at %s:%s", Z2M_MQTT_HOST, Z2M_MQTT_PORT)
         client.subscribe(f"{self.topic_prefix}/bridge/devices", qos=0)
         client.subscribe(f"{self.topic_prefix}/+", qos=0)
+        client.publish(
+            f"{self.topic_prefix}/bridge/request/devices",
+            payload="{}",
+            qos=0,
+            retain=False,
+        )
 
     def _on_disconnect(self, _client, _userdata, reason_code, _properties=None) -> None:
         self._connected = False
