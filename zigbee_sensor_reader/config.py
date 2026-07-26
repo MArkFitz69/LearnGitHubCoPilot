@@ -14,7 +14,11 @@ import os
 # Zigbee backend selector:
 # - "direct": existing bellows/EZSP TCP serial path to Dongle-M
 # - "z2m":    consume Sonoff telemetry from Zigbee2MQTT over MQTT
-ZIGBEE_BACKEND = os.environ.get("ZIGBEE_BACKEND", "direct").strip().lower()
+_backend_raw = os.environ.get("ZIGBEE_BACKEND", "direct").strip().lower()
+if _backend_raw in {"z2m", "zigbee2mqtt", "mqtt"}:
+    ZIGBEE_BACKEND = "z2m"
+else:
+    ZIGBEE_BACKEND = "direct"
 
 # Network connection for the Sonoff Zigbee Dongle-M (Ethernet)
 # The dongle exposes a TCP serial socket on the network
