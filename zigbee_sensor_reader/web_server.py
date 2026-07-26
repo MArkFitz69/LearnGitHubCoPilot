@@ -147,6 +147,20 @@ def _reading_age_seconds(timestamp_iso: str | None) -> int | None:
     return max(0, int((datetime.now() - reading_ts).total_seconds()))
 
 
+def _canonical_sensor_key(ieee_address: str | None) -> str:
+    """Normalize sensor identity so legacy 0x Zigbee IDs don't duplicate rows."""
+    if not ieee_address:
+        return ""
+    key = ieee_address.strip().lower()
+    if key.startswith("hive:") or key.startswith("hive-hw:") or key.startswith("shelly:"):
+        return key
+    if key.startswith("0x") and len(key) == 18:
+        raw = key[2:]
+        if all(ch in "0123456789abcdef" for ch in raw):
+            return ":".join(raw[i : i + 2] for i in range(0, 16, 2))
+    return key
+
+
 def _freshness_state(age_seconds: int | None) -> str:
     if age_seconds is None:
         return "unknown"
@@ -553,7 +567,22 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
         """,
         (today_local,),
     ).fetchall()
-    daily_by_sensor = {row["ieee_address"]: dict(row) for row in daily_rows}
+    daily_by_sensor: dict[str, dict] = {}
+    for row in daily_rows:
+        key = _canonical_sensor_key(row["ieee_address"])
+        existing = daily_by_sensor.get(key)
+        row_dict = dict(row)
+        if not existing:
+            daily_by_sensor[key] = row_dict
+            continue
+        # Merge if legacy and canonical identities both exist for same device.
+        for col_min, col_max in (("min_temp_c", "max_temp_c"), ("min_humidity_pct", "max_humidity_pct")):
+            a_min, a_max = existing.get(col_min), existing.get(col_max)
+            b_min, b_max = row_dict.get(col_min), row_dict.get(col_max)
+            if b_min is not None and (a_min is None or b_min < a_min):
+                existing[col_min] = b_min
+            if b_max is not None and (a_max is None or b_max > a_max):
+                existing[col_max] = b_max
     hive_runtime_seconds = _calculate_hive_runtime_seconds(conn, today_local)
 
     sonoff = []
@@ -561,10 +590,22 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
     hive = []
     hotwater = []
 
+    deduped_latest: dict[str, dict] = {}
     for row in latest_rows:
-        ieee_address = row["ieee_address"]
-        model = row["model"] or ""
         latest = dict(row)
+        key = _canonical_sensor_key(latest.get("ieee_address"))
+        latest["ieee_address"] = key or latest.get("ieee_address")
+        existing = deduped_latest.get(latest["ieee_address"])
+        if (
+            existing is None
+            or (not existing.get("friendly_name") and latest.get("friendly_name"))
+            or (not existing.get("model") and latest.get("model"))
+        ):
+            deduped_latest[latest["ieee_address"]] = latest
+
+    for latest in deduped_latest.values():
+        ieee_address = latest["ieee_address"]
+        model = latest.get("model") or ""
         if ieee_address.startswith("shelly:"):
             mac = ieee_address.split("shelly:", 1)[1].upper()
             configured_name = SHELLY_SENSORS.get(mac)
