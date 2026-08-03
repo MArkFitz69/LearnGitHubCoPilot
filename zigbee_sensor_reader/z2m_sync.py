@@ -30,6 +30,12 @@ Z2M_MQTT_PORT = int(os.environ.get("Z2M_MQTT_PORT", "8081"))
 Z2M_MQTT_USER = os.environ.get("Z2M_MQTT_USER", "")
 Z2M_MQTT_PASS = os.environ.get("Z2M_MQTT_PASS", "")
 Z2M_TOPIC_PREFIX = os.environ.get("Z2M_TOPIC_PREFIX", "zigbee2mqtt")
+# Transport: "websockets" for port 8081 (Mosquitto WS), "tcp" for port 1883 (raw MQTT)
+# Defaults to "websockets" because port 1883 is not open on this installation.
+Z2M_MQTT_TRANSPORT = os.environ.get(
+    "Z2M_MQTT_TRANSPORT",
+    "tcp" if Z2M_MQTT_PORT == 1883 else "websockets",
+)
 
 
 def _normalise_ieee(ieee_raw: str) -> str:
@@ -149,7 +155,7 @@ async def run_z2m_sync(get_conn_fn) -> None:
             logger.warning("z2m MQTT disconnected unexpectedly (rc=%d)", rc)
 
     while True:
-        client = mqtt.Client()
+        client = mqtt.Client(transport=Z2M_MQTT_TRANSPORT)
         client.on_connect = on_connect
         client.on_message = on_message
         client.on_disconnect = on_disconnect
@@ -158,6 +164,10 @@ async def run_z2m_sync(get_conn_fn) -> None:
             client.username_pw_set(Z2M_MQTT_USER, Z2M_MQTT_PASS)
 
         try:
+            logger.info(
+                "z2m MQTT connecting to %s:%d (transport=%s)",
+                Z2M_MQTT_HOST, Z2M_MQTT_PORT, Z2M_MQTT_TRANSPORT,
+            )
             client.connect_async(Z2M_MQTT_HOST, Z2M_MQTT_PORT, keepalive=60)
             client.loop_start()
             # Keep the task alive; the paho background thread handles I/O
