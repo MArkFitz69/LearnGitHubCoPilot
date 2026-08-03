@@ -12,21 +12,12 @@ Usage:
 import argparse
 import asyncio
 import logging
-import sys
 import time
 
 from .config import POLLING_INTERVAL, SENSOR_NAMES, ZONES
 from .database import get_connection, insert_reading, upsert_sensor
 from .export import export_to_csv, export_to_excel, get_sensor_summary
-from .onboarding import (
-    fetch_pending_commands,
-    mark_command_done,
-    mark_command_failed,
-    maybe_close_expired_pairing,
-    record_device_joined,
-    record_first_reading,
-    set_pairing_state,
-)
+from .onboarding import record_first_reading
 
 logging.basicConfig(
     level=logging.INFO,
@@ -93,128 +84,51 @@ def handle_reading(reading, conn) -> None:
     print("  ".join(parts))
 
 
-def _handle_device_joined(conn, ieee_address: str, model: str | None) -> None:
-    upsert_sensor(
-        conn,
-        ieee_address=ieee_address,
-        model=model,
-    )
-    record_device_joined(conn, ieee_address, model)
-
-
-async def _recover_listener_for_pairing(listener) -> None:
-    """Reinitialize the Zigbee listener to recover from stale EZSP transport state."""
-    try:
-        await listener.stop()
-    except Exception as exc:
-        logger.warning("Listener stop during pairing recovery failed: %s", exc)
-    await asyncio.sleep(1)
-    await listener.start()
-
-
-async def _process_onboarding_commands(listener, conn) -> None:
-    maybe_close_expired_pairing(conn)
-    for row in fetch_pending_commands(conn):
-        command_id = row["id"]
-        command = row["command"]
-        if command != "start_pairing":
-            mark_command_failed(conn, command_id, f"Unknown command: {command}")
-            continue
-
-        last_error = None
-        for attempt in (1, 2):
-            try:
-                await listener.permit_join(duration=120)
-                set_pairing_state(conn, active=True, duration_seconds=120)
-                mark_command_done(conn, command_id)
-                last_error = None
-                break
-            except Exception as exc:
-                last_error = exc
-                logger.warning("permit_join attempt %d failed: %s", attempt, exc)
-                if attempt == 1:
-                    await _recover_listener_for_pairing(listener)
-
-        if last_error is not None:
-            mark_command_failed(conn, command_id, f"permit_join failed: {last_error}")
-
-
 async def run_collector(pair: bool = False) -> None:
-    """Run the main data collection loop."""
-    # Import Zigbee dependencies only when actually collecting data
-    from .zigbee_reader import ZigbeeSensorListener
-
+    """Run the main data collection loop using Zigbee2MQTT via MQTT."""
     conn = get_connection()
     logger.info("Database ready at %s", conn.execute("PRAGMA database_list").fetchone()[2])
 
-    # Register any pre-configured sensor names
+    # Seed any pre-configured sensor names (config.py fallback, z2m will overwrite)
     for ieee, name in SENSOR_NAMES.items():
         upsert_sensor(conn, ieee_address=ieee, friendly_name=name, zone=ZONES.get(ieee))
 
-    listener = ZigbeeSensorListener(
-        on_reading=lambda reading: handle_reading(reading, conn),
-        on_device_joined=lambda ieee, model: _handle_device_joined(conn, ieee, model),
+    if pair:
+        logger.info(
+            "Note: pairing is managed by Zigbee2MQTT. "
+            "Use the z2m web UI at http://home-logger:8080 to permit joining."
+        )
+
+    logger.info(
+        "Starting data collection via Zigbee2MQTT MQTT (host=%s port=%d). "
+        "Hive poll interval: %ds",
+        __import__("os").environ.get("Z2M_MQTT_HOST", "home-logger"),
+        int(__import__("os").environ.get("Z2M_MQTT_PORT", "8081")),
+        POLLING_INTERVAL,
     )
 
     try:
-        await listener.start()
-
-        # Start Zigbee2MQTT name sync in the background (non-fatal if unavailable)
-        try:
-            from .z2m_sync import run_z2m_sync
-            asyncio.create_task(run_z2m_sync(lambda: conn))
-            logger.info("Zigbee2MQTT name sync task started")
-        except Exception as exc:
-            logger.warning("z2m sync task could not start: %s", exc)
-
-        if pair:
-            logger.info(
-                "Pairing mode: network is open for 120 seconds. "
-                "Put your sensor in pairing mode now (hold button 5+ seconds)."
+        from .z2m_reader import run_z2m_reader
+        asyncio.create_task(
+            run_z2m_reader(
+                on_reading=lambda reading: handle_reading(reading, conn),
+                get_conn_fn=lambda: conn,
             )
-            await listener.permit_join(duration=120)
-            set_pairing_state(conn, active=True, duration_seconds=120)
-
-        logger.info(
-            "Collecting sensor data (Ctrl+C to stop). "
-            "Polling interval: %ds",
-            POLLING_INTERVAL,
         )
+        logger.info("Zigbee2MQTT sensor reader started")
+    except Exception as exc:
+        logger.error("Could not start z2m reader: %s", exc)
 
-        next_sensor_poll = 0.0
-        next_min_max_poll = 0.0
+    try:
+        next_poll = 0.0
         while True:
-            await _process_onboarding_commands(listener, conn)
-
+            await asyncio.sleep(1)
             now = time.monotonic()
-            if now < next_sensor_poll:
-                await asyncio.sleep(1)
+            if now < next_poll:
                 continue
+            next_poll = now + POLLING_INTERVAL
 
-            next_sensor_poll = now + POLLING_INTERVAL
-
-            # Every 10 minutes: explicitly read min/max attributes from SNZB-02DR2
-            # sensors to populate zigpy's cache (they're not always auto-reported).
-            if now >= next_min_max_poll:
-                next_min_max_poll = now + 600  # 10 minutes
-                try:
-                    from .zigbee_reader import poll_min_max_attributes
-                    await poll_min_max_attributes(listener.app)
-                except Exception as e:
-                    logger.debug("Min/max attribute poll skipped: %s", e)
-
-            # Read cached Zigbee sensor values and store them
-            try:
-                from .zigbee_reader import read_cached_sensors
-                cached = read_cached_sensors(listener.app)
-                for reading in cached:
-                    handle_reading(reading, conn)
-                if cached:
-                    logger.info("Stored %d Zigbee sensor readings (cached)", len(cached))
-            except Exception as e:
-                logger.debug("Zigbee cache read failed: %s", e)
-
-            # Poll Hive if credentials are configured
+            # Poll Hive thermostats + hot water
             try:
                 from .hive_reader import poll_hive, HIVE_USERNAME
                 if HIVE_USERNAME:
@@ -228,14 +142,13 @@ async def run_collector(pair: bool = False) -> None:
                 from .config import SHELLY_SCAN_DURATION
                 await poll_shelly_ble(scan_duration=SHELLY_SCAN_DURATION)
             except ImportError:
-                pass  # bleak not installed (e.g. running on Windows dev machine)
+                pass  # bleak not installed
             except Exception as e:
                 logger.debug("Shelly BLE poll skipped: %s", e)
 
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
-        await listener.stop()
         conn.close()
 
 
