@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 def _get_sensor_metadata(conn, ieee_address: str):
     return conn.execute(
-        "SELECT friendly_name, zone FROM sensors WHERE ieee_address = ?",
+        "SELECT friendly_name, zone, zone_override FROM sensors WHERE ieee_address = ?",
         (ieee_address,),
     ).fetchone()
 
@@ -37,7 +37,10 @@ def _get_sensor_metadata(conn, ieee_address: str):
 def handle_reading(reading, conn) -> None:
     """Process an incoming sensor reading: store in DB and print to console."""
     existing = _get_sensor_metadata(conn, reading.ieee_address)
-    zone = ZONES.get(reading.ieee_address) or (existing["zone"] if existing else None)
+    # Use zone_override (set by z2m description or dashboard) first, then sensors.zone, then config
+    zone = ZONES.get(reading.ieee_address)
+    if not zone and existing:
+        zone = existing["zone_override"] or existing["zone"]
     friendly_name = reading.friendly_name
     if (not friendly_name or friendly_name == reading.ieee_address) and existing:
         friendly_name = existing["friendly_name"] or reading.friendly_name
