@@ -148,6 +148,7 @@ def _create_tables(conn: sqlite3.Connection) -> None:
     )
     conn.commit()
     _migrate_normalise_ieee(conn)
+    _migrate_alias_ieee_from_friendly_names(conn)
 
 
 def _normalise_ieee(raw: str) -> str:
@@ -200,6 +201,51 @@ def _migrate_normalise_ieee(conn: sqlite3.Connection) -> None:
                 "UPDATE readings SET ieee_address = ? WHERE ieee_address = ?",
                 (canon, raw_ieee),
             )
+    conn.commit()
+
+
+def _migrate_alias_ieee_from_friendly_names(conn: sqlite3.Connection) -> None:
+    """Merge legacy rows where ieee_address was accidentally set to friendly name.
+
+    Early z2m fallback behavior could create sensor/readings rows keyed by names
+    like 'Ensuite' before bridge/devices mapping arrived. Once canonical z2m rows
+    exist, move those readings onto the canonical IEEE and remove alias rows.
+    """
+    canon_rows = conn.execute(
+        """
+        SELECT ieee_address, friendly_name
+        FROM sensors
+        WHERE name_source = 'z2m'
+          AND friendly_name IS NOT NULL
+          AND friendly_name <> ''
+        """
+    ).fetchall()
+
+    if not canon_rows:
+        return
+
+    for row in canon_rows:
+        canonical_ieee = row["ieee_address"]
+        alias_ieee = row["friendly_name"]
+        if not alias_ieee or alias_ieee == canonical_ieee:
+            continue
+
+        alias_exists = conn.execute(
+            "SELECT 1 FROM sensors WHERE ieee_address = ?",
+            (alias_ieee,),
+        ).fetchone()
+        if not alias_exists:
+            continue
+
+        conn.execute(
+            "UPDATE readings SET ieee_address = ? WHERE ieee_address = ?",
+            (canonical_ieee, alias_ieee),
+        )
+        conn.execute(
+            "DELETE FROM sensors WHERE ieee_address = ?",
+            (alias_ieee,),
+        )
+
     conn.commit()
 
 
