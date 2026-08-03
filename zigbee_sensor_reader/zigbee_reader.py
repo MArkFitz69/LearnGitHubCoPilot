@@ -192,20 +192,43 @@ class ZigbeeSensorListener:
         )
 
         if cluster.cluster_id == TemperatureMeasurement.cluster_id:
-            # ZCL temperature is in units of 0.01°C
-            reading.temperature_c = value / 100.0
-            logger.info("%s temperature: %.1f°C", friendly, reading.temperature_c)
+            # ZCL temperature attrs: 0x0000=measured, 0x0001=min, 0x0002=max (units: 0.01°C)
+            if attrid == 0x0000:
+                reading.temperature_c = value / 100.0
+                logger.info("%s temperature: %.1f°C", friendly, reading.temperature_c)
+            elif attrid == 0x0001 and value != 0x8000:
+                reading.device_min_temp_c = value / 100.0
+                logger.debug("%s device min temp: %.1f°C", friendly, reading.device_min_temp_c)
+            elif attrid == 0x0002 and value != 0x8000:
+                reading.device_max_temp_c = value / 100.0
+                logger.debug("%s device max temp: %.1f°C", friendly, reading.device_max_temp_c)
+            else:
+                return
 
         elif cluster.cluster_id == RelativeHumidity.cluster_id:
-            # ZCL humidity is in units of 0.01%
-            reading.humidity_pct = value / 100.0
-            logger.info("%s humidity: %.1f%%", friendly, reading.humidity_pct)
+            # ZCL humidity attrs: 0x0000=measured, 0x0001=min, 0x0002=max (units: 0.01%)
+            if attrid == 0x0000:
+                reading.humidity_pct = value / 100.0
+                logger.info("%s humidity: %.1f%%", friendly, reading.humidity_pct)
+            elif attrid == 0x0001 and value != 0xFFFF:
+                reading.device_min_humidity_pct = value / 100.0
+                logger.debug("%s device min humidity: %.1f%%", friendly, reading.device_min_humidity_pct)
+            elif attrid == 0x0002 and value != 0xFFFF:
+                reading.device_max_humidity_pct = value / 100.0
+                logger.debug("%s device max humidity: %.1f%%", friendly, reading.device_max_humidity_pct)
+            else:
+                return
 
         elif cluster.cluster_id == PowerConfiguration.cluster_id:
-            # Battery percentage remaining
-            # ZCL reports battery percentage as 0-200 (0.5% steps)
-            reading.battery_pct = value / 2.0
-            logger.info("%s battery: %.0f%%", friendly, reading.battery_pct)
+            # 0x0021=battery_percentage_remaining (0-200, 0.5% steps), 0x0020=voltage (100mV)
+            if attrid == 0x0021:
+                reading.battery_pct = value / 2.0
+                logger.info("%s battery: %.0f%%", friendly, reading.battery_pct)
+            elif attrid == 0x0020:
+                reading.battery_voltage_mv = value * 100.0
+                logger.debug("%s battery voltage: %.0f mV", friendly, reading.battery_voltage_mv)
+            else:
+                return
 
         else:
             return  # Ignore clusters we don't care about
@@ -307,6 +330,49 @@ async def poll_sensors(app: ControllerApplication) -> list[SensorReading]:
                 readings.append(reading)
 
     return readings
+
+
+async def poll_min_max_attributes(app: ControllerApplication) -> None:
+    """
+    Actively read min/max measured values from all sensors.
+
+    The SNZB-02DR2 stores its rolling daily min/max in ZCL attributes
+    0x0001 (MinMeasuredValue) and 0x0002 (MaxMeasuredValue) but does not
+    always include them in periodic attribute reports.  Calling this
+    function populates zigpy's attribute cache so that the next
+    read_cached_sensors() call picks them up.
+
+    Call at a longer interval than the main poll (e.g. every 10 minutes).
+    """
+    for ieee, device in app.devices.items():
+        friendly = SENSOR_NAMES.get(str(ieee), str(ieee))
+        for ep_id, endpoint in device.endpoints.items():
+            if ep_id == 0:
+                continue
+
+            if TemperatureMeasurement.cluster_id in endpoint.in_clusters:
+                cluster = endpoint.in_clusters[TemperatureMeasurement.cluster_id]
+                try:
+                    await cluster.read_attributes(
+                        ["min_measured_value", "max_measured_value"]
+                    )
+                    logger.debug("Polled temp min/max from %s", friendly)
+                except Exception as exc:
+                    logger.debug(
+                        "Failed to poll temp min/max from %s: %s", friendly, exc
+                    )
+
+            if RelativeHumidity.cluster_id in endpoint.in_clusters:
+                cluster = endpoint.in_clusters[RelativeHumidity.cluster_id]
+                try:
+                    await cluster.read_attributes(
+                        ["min_measured_value", "max_measured_value"]
+                    )
+                    logger.debug("Polled humidity min/max from %s", friendly)
+                except Exception as exc:
+                    logger.debug(
+                        "Failed to poll humidity min/max from %s: %s", friendly, exc
+                    )
 
 
 def read_cached_sensors(app: ControllerApplication) -> list[SensorReading]:

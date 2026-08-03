@@ -174,6 +174,7 @@ async def run_collector(pair: bool = False) -> None:
         )
 
         next_sensor_poll = 0.0
+        next_min_max_poll = 0.0
         while True:
             await _process_onboarding_commands(listener, conn)
 
@@ -183,6 +184,16 @@ async def run_collector(pair: bool = False) -> None:
                 continue
 
             next_sensor_poll = now + POLLING_INTERVAL
+
+            # Every 10 minutes: explicitly read min/max attributes from SNZB-02DR2
+            # sensors to populate zigpy's cache (they're not always auto-reported).
+            if now >= next_min_max_poll:
+                next_min_max_poll = now + 600  # 10 minutes
+                try:
+                    from .zigbee_reader import poll_min_max_attributes
+                    await poll_min_max_attributes(listener.app)
+                except Exception as e:
+                    logger.debug("Min/max attribute poll skipped: %s", e)
 
             # Read cached Zigbee sensor values and store them
             try:
