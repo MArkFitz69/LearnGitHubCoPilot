@@ -99,22 +99,46 @@ async def fetch_hive_data() -> dict:
                 logger.warning("Failed to read Hive heating %s: %s", friendly_name, e)
 
         # ── Hot water ───────────────────────────────────────────────────────
-        # Try both common key names across library versions
+        # Log the full session key list so we can see exactly where hot water lives
+        logger.info("Hive session keys: %s", list(session.keys()))
+
+        # Try all known key names across library versions
         hw_devices = (
             session.get("water_heater")
+            or session.get("hotWater")
             or session.get("hotwater")
             or getattr(hive, "device_list", {}).get("water_heater")
+            or getattr(hive, "device_list", {}).get("hotWater")
             or []
         )
+        logger.info("Hive hot water devices found: %d", len(hw_devices))
         for dev in hw_devices:
             hive_name = dev.get("hiveName", dev.get("hive_name", "Hot Water"))
             device_id = dev.get("hiveID", dev.get("device_id", "hotwater"))
             friendly_name = HIVE_NAMES.get(hive_name, hive_name)
 
+            # Discover available methods on hive.hotwater at runtime
+            hw_api = hive.hotwater
+            def _try_hw(method_names, arg):
+                for name in method_names:
+                    fn = getattr(hw_api, name, None)
+                    if fn is not None:
+                        return fn, name
+                logger.warning(
+                    "hive.hotwater has none of %s — available: %s",
+                    method_names,
+                    [m for m in dir(hw_api) if not m.startswith("_")],
+                )
+                return None, None
+
             try:
-                mode = await hive.hotwater.getMode(dev)
-                state = await hive.hotwater.getState(dev)
-                boost = await hive.hotwater.getBoostStatus(dev)
+                get_mode_fn, _ = _try_hw(["getMode", "get_mode", "mode"], dev)
+                get_state_fn, _ = _try_hw(["getState", "get_state", "state"], dev)
+                get_boost_fn, _ = _try_hw(["getBoostStatus", "get_boost_status", "boostStatus"], dev)
+
+                mode = await get_mode_fn(dev) if get_mode_fn else None
+                state = await get_state_fn(dev) if get_state_fn else None
+                boost = await get_boost_fn(dev) if get_boost_fn else None
 
                 hw_on = state not in ("OFF", None, False)
                 boost_active = boost not in ("OFF", None, False)

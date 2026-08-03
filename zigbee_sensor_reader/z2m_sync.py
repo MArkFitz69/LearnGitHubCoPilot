@@ -58,6 +58,9 @@ def sync_z2m_devices(devices_payload: str, conn: sqlite3.Connection) -> int:
     """
     Parse a zigbee2mqtt/bridge/devices JSON payload and upsert friendly names.
 
+    Also reads the device ``description`` field as a zone if set — this lets
+    you assign zones directly in the Zigbee2MQTT UI without editing config.py.
+
     Returns the number of sensors updated.
     """
     try:
@@ -79,17 +82,24 @@ def sync_z2m_devices(devices_payload: str, conn: sqlite3.Connection) -> int:
             continue
         ieee = _normalise_ieee(ieee_raw)
         friendly_name = dev.get("friendly_name") or dev.get("friendlyName", "")
-        if not friendly_name or friendly_name == ieee_raw:
-            # z2m uses the raw IEEE as the name when no name has been set
+        # Skip devices that have no custom name (z2m uses raw IEEE as default name)
+        if not friendly_name or friendly_name == ieee_raw or friendly_name == ieee:
             continue
         model = (
             dev.get("definition", {}).get("model")
             or dev.get("modelID")
             or dev.get("model_id")
         )
+        # Use the z2m description field as zone if set
+        zone_from_desc = dev.get("description") or None
+
+        logger.info(
+            "z2m device: raw_ieee=%s → normalised=%s name=%r zone=%r",
+            ieee_raw, ieee, friendly_name, zone_from_desc,
+        )
 
         try:
-            from .database import upsert_sensor
+            from .database import upsert_sensor, set_sensor_zone_override
             upsert_sensor(
                 conn,
                 ieee_address=ieee,
@@ -97,13 +107,21 @@ def sync_z2m_devices(devices_payload: str, conn: sqlite3.Connection) -> int:
                 model=model or None,
                 name_source="z2m",
             )
+            # If z2m has a description set, apply it as the zone override
+            if zone_from_desc:
+                set_sensor_zone_override(conn, ieee, zone_from_desc)
             updated += 1
-            logger.debug("z2m sync: %s → %s", ieee, friendly_name)
         except Exception as exc:
             logger.warning("z2m sync failed for %s: %s", ieee, exc)
 
     if updated:
         logger.info("z2m sync: updated %d device name(s)", updated)
+    else:
+        logger.info(
+            "z2m sync: no updates (received %d devices, none had custom names "
+            "or all names matched IEEE address)",
+            len(devices),
+        )
     return updated
 
 
