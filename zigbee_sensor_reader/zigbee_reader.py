@@ -344,6 +344,7 @@ async def poll_min_max_attributes(app: ControllerApplication) -> None:
 
     Call at a longer interval than the main poll (e.g. every 10 minutes).
     """
+    logger.info("Polling min/max attributes from %d devices", len(list(app.devices.items())))
     for ieee, device in app.devices.items():
         friendly = SENSOR_NAMES.get(str(ieee), str(ieee))
         for ep_id, endpoint in device.endpoints.items():
@@ -353,24 +354,34 @@ async def poll_min_max_attributes(app: ControllerApplication) -> None:
             if TemperatureMeasurement.cluster_id in endpoint.in_clusters:
                 cluster = endpoint.in_clusters[TemperatureMeasurement.cluster_id]
                 try:
-                    await cluster.read_attributes(
+                    result = await cluster.read_attributes(
                         ["min_measured_value", "max_measured_value"]
                     )
-                    logger.debug("Polled temp min/max from %s", friendly)
+                    min_val = result[0].get("min_measured_value")
+                    max_val = result[0].get("max_measured_value")
+                    logger.info(
+                        "Polled temp min/max from %s: min=%s max=%s",
+                        friendly, min_val, max_val,
+                    )
                 except Exception as exc:
-                    logger.debug(
+                    logger.info(
                         "Failed to poll temp min/max from %s: %s", friendly, exc
                     )
 
             if RelativeHumidity.cluster_id in endpoint.in_clusters:
                 cluster = endpoint.in_clusters[RelativeHumidity.cluster_id]
                 try:
-                    await cluster.read_attributes(
+                    result = await cluster.read_attributes(
                         ["min_measured_value", "max_measured_value"]
                     )
-                    logger.debug("Polled humidity min/max from %s", friendly)
+                    min_val = result[0].get("min_measured_value")
+                    max_val = result[0].get("max_measured_value")
+                    logger.info(
+                        "Polled humidity min/max from %s: min=%s max=%s",
+                        friendly, min_val, max_val,
+                    )
                 except Exception as exc:
-                    logger.debug(
+                    logger.info(
                         "Failed to poll humidity min/max from %s: %s", friendly, exc
                     )
 
