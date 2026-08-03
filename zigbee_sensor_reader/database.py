@@ -147,6 +147,60 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         (now,),
     )
     conn.commit()
+    _migrate_normalise_ieee(conn)
+
+
+def _normalise_ieee(raw: str) -> str:
+    """Convert 0xaabbccddeeff0011 → aa:bb:cc:dd:ee:ff:00:11."""
+    addr = raw.lower().strip()
+    if addr.startswith("0x"):
+        addr = addr[2:]
+    if ":" not in addr and len(addr) == 16:
+        addr = ":".join(addr[i:i + 2] for i in range(0, 16, 2))
+    return addr
+
+
+def _migrate_normalise_ieee(conn: sqlite3.Connection) -> None:
+    """One-time migration: normalise raw 0x... IEEE addresses to colon format.
+
+    Old bellows-era rows may have been stored as '0xf4b3b1fffe60ae82' while
+    new z2m rows use 'f4:b3:b1:ff:fe:60:ae:82'.  This merges duplicate rows
+    and re-points all readings to the canonical colon-format key.
+    """
+    raw_rows = conn.execute(
+        "SELECT ieee_address FROM sensors WHERE ieee_address LIKE '0x%'"
+    ).fetchall()
+    if not raw_rows:
+        return
+
+    for row in raw_rows:
+        raw_ieee = row["ieee_address"]
+        canon = _normalise_ieee(raw_ieee)
+        if canon == raw_ieee:
+            continue  # already normalised (shouldn't happen if LIKE '0x%')
+
+        existing = conn.execute(
+            "SELECT ieee_address FROM sensors WHERE ieee_address = ?", (canon,)
+        ).fetchone()
+
+        if existing:
+            # Canonical form already exists — re-point readings then drop the raw row
+            conn.execute(
+                "UPDATE readings SET ieee_address = ? WHERE ieee_address = ?",
+                (canon, raw_ieee),
+            )
+            conn.execute("DELETE FROM sensors WHERE ieee_address = ?", (raw_ieee,))
+        else:
+            # Canonical form doesn't exist — just rename in place
+            conn.execute(
+                "UPDATE sensors SET ieee_address = ? WHERE ieee_address = ?",
+                (canon, raw_ieee),
+            )
+            conn.execute(
+                "UPDATE readings SET ieee_address = ? WHERE ieee_address = ?",
+                (canon, raw_ieee),
+            )
+    conn.commit()
 
 
 def upsert_sensor(

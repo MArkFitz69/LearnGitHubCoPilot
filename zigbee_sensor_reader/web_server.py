@@ -461,6 +461,9 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
             sonoff.append(sensor_row)
         elif ieee_address.startswith("shelly:") or model == "Shelly Blu H&T":
             shelly.append(sensor_row)
+        else:
+            # Any other Zigbee sensor (unknown model, other Sonoff models, etc.)
+            sonoff.append(sensor_row)
 
     sonoff.sort(key=lambda row: (_zone_sort_key(row.get("zone")), row.get("friendly_name") or row.get("ieee_address")))
     hive.sort(key=lambda row: (_zone_sort_key(row.get("zone")), row.get("friendly_name") or row.get("ieee_address")))

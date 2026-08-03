@@ -107,6 +107,17 @@ class Z2MReader:
 
         if remainder == "bridge/devices":
             self._handle_bridge_devices(payload)
+        elif remainder == "bridge/response/devices":
+            # Response to our bridge/request/devices — contains a 'data' wrapper
+            try:
+                resp = json.loads(payload)
+                devices_payload = resp.get("data", payload) if isinstance(resp, dict) else payload
+                if isinstance(devices_payload, list):
+                    self._handle_bridge_devices(json.dumps(devices_payload))
+                elif isinstance(devices_payload, str):
+                    self._handle_bridge_devices(devices_payload)
+            except Exception:
+                pass
         elif remainder.startswith("bridge/"):
             pass  # ignore other bridge messages
         else:
@@ -246,6 +257,8 @@ async def run_z2m_reader(
                 Z2M_MQTT_HOST, Z2M_MQTT_PORT, Z2M_MQTT_TRANSPORT,
             )
             client.subscribe(sensor_topic, qos=0)
+            # Request z2m to re-publish the full device list so we get names/zones
+            client.publish(f"{Z2M_TOPIC_PREFIX}/bridge/request/devices", "", qos=0)
         else:
             logger.warning(
                 "z2m MQTT connection refused rc=%d (host=%s port=%d transport=%s)",
