@@ -34,6 +34,8 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             friendly_name TEXT,
             model         TEXT,
             zone          TEXT,
+            zone_override TEXT,
+            name_source   TEXT DEFAULT 'config',
             first_seen    TEXT NOT NULL,
             last_seen     TEXT NOT NULL
         );
@@ -105,6 +107,8 @@ def _create_tables(conn: sqlite3.Connection) -> None:
     # Add columns to existing databases (safe to run multiple times)
     migrations = [
         ("sensors", "zone", "TEXT"),
+        ("sensors", "zone_override", "TEXT"),
+        ("sensors", "name_source", "TEXT"),
         ("readings", "zone", "TEXT"),
         ("readings", "heating_on", "INTEGER"),
         ("readings", "boost_on", "INTEGER"),
@@ -151,20 +155,72 @@ def upsert_sensor(
     friendly_name: str | None = None,
     model: str | None = None,
     zone: str | None = None,
+    name_source: str = "config",
 ) -> None:
-    """Insert or update a sensor in the registry."""
+    """Insert or update a sensor in the registry.
+
+    ``name_source`` should be ``"z2m"`` when the name comes from Zigbee2MQTT,
+    or ``"config"`` (default) when it comes from config.py.
+
+    z2m names always overwrite; config names only write when no z2m name
+    has been set yet (i.e. when name_source is not already 'z2m').
+    """
+    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    if name_source == "z2m":
+        # z2m always wins — unconditionally update name, model, and source
+        conn.execute(
+            """
+            INSERT INTO sensors (ieee_address, friendly_name, model, zone, name_source, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, 'z2m', ?, ?)
+            ON CONFLICT(ieee_address) DO UPDATE SET
+                friendly_name = COALESCE(excluded.friendly_name, sensors.friendly_name),
+                model         = COALESCE(excluded.model, sensors.model),
+                zone          = COALESCE(excluded.zone, sensors.zone),
+                name_source   = 'z2m',
+                last_seen     = excluded.last_seen
+            """,
+            (ieee_address, friendly_name, model, zone, now, now),
+        )
+    else:
+        # config.py — only set the name if z2m hasn't already claimed it
+        conn.execute(
+            """
+            INSERT INTO sensors (ieee_address, friendly_name, model, zone, name_source, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, 'config', ?, ?)
+            ON CONFLICT(ieee_address) DO UPDATE SET
+                friendly_name = CASE
+                    WHEN sensors.name_source = 'z2m' THEN sensors.friendly_name
+                    ELSE COALESCE(excluded.friendly_name, sensors.friendly_name)
+                END,
+                model         = COALESCE(excluded.model, sensors.model),
+                zone          = COALESCE(excluded.zone, sensors.zone),
+                name_source   = CASE
+                    WHEN sensors.name_source = 'z2m' THEN 'z2m'
+                    ELSE 'config'
+                END,
+                last_seen     = excluded.last_seen
+            """,
+            (ieee_address, friendly_name, model, zone, now, now),
+        )
+    conn.commit()
+
+
+def set_sensor_zone_override(
+    conn: sqlite3.Connection,
+    ieee_address: str,
+    zone_override: str | None,
+) -> None:
+    """Set (or clear) a dashboard zone override for a sensor.
+
+    ``zone_override=None`` clears the override so the config.py zone is used.
+    """
     now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     conn.execute(
         """
-        INSERT INTO sensors (ieee_address, friendly_name, model, zone, first_seen, last_seen)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(ieee_address) DO UPDATE SET
-            friendly_name = COALESCE(excluded.friendly_name, sensors.friendly_name),
-            model         = COALESCE(excluded.model, sensors.model),
-            zone          = COALESCE(excluded.zone, sensors.zone),
-            last_seen     = excluded.last_seen
+        UPDATE sensors SET zone_override = ?, last_seen = ?
+        WHERE ieee_address = ?
         """,
-        (ieee_address, friendly_name, model, zone, now, now),
+        (zone_override, now, ieee_address),
     )
     conn.commit()
 

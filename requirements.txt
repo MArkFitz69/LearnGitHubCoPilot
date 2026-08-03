@@ -12,6 +12,9 @@ pyhive-integration>=1.0.0
 # Shelly Blu H&T BLE sensor support
 bleak>=0.21.0
 
+# Zigbee2MQTT name sync via MQTT
+paho-mqtt>=1.6.0
+
 # Web API for remote data access (Power BI, Excel, etc.)
 flask>=3.0.0
 

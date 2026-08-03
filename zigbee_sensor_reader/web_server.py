@@ -352,11 +352,13 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
     latest_rows = conn.execute(
         """
         SELECT r.ieee_address, s.friendly_name, s.model, r.timestamp, r.reading_date, r.reading_time,
-               r.temperature_c, r.humidity_pct, r.battery_pct, r.zone,
+               r.temperature_c, r.humidity_pct, r.battery_pct,
+               COALESCE(s.zone_override, r.zone) AS zone,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
                r.device_min_temp_c, r.device_max_temp_c,
                r.device_min_humidity_pct, r.device_max_humidity_pct,
-               r.battery_voltage_mv, r.rssi
+               r.battery_voltage_mv, r.rssi,
+               s.zone_override, s.name_source
         FROM readings r
         INNER JOIN (
             SELECT ieee_address, MAX(timestamp) AS max_ts
@@ -496,6 +498,27 @@ def api_status():
         "latest_reading": latest,
         "server_time": datetime.now().isoformat(),
     })
+
+
+@app.route("/api/sensors/<path:ieee_address>/zone", methods=["PATCH"])
+def api_set_zone(ieee_address: str):
+    """Set or clear a zone override for a sensor.
+
+    Body (JSON): {"zone": "Zone 1"}  — set a zone
+                 {"zone": null}       — clear the override (revert to config.py)
+    """
+    from .database import set_sensor_zone_override
+    data = request.get_json(silent=True) or {}
+    zone_value = data.get("zone")  # None means clear
+    conn = get_db_write()
+    try:
+        set_sensor_zone_override(conn, ieee_address, zone_value or None)
+        return jsonify({"ok": True, "ieee_address": ieee_address, "zone_override": zone_value})
+    except Exception as exc:
+        logger.warning("Zone update failed for %s: %s", ieee_address, exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    finally:
+        conn.close()
 
 
 @app.route("/api/system")
@@ -713,6 +736,13 @@ def dashboard():
     .status-on { color: #0b7a0b; font-weight: bold; }
     .status-off { color: #a33; font-weight: bold; }
     .status-boost { color: #8a2be2; font-weight: bold; }
+    .zone-cell { white-space: nowrap; }
+    .zone-val { cursor: pointer; border-bottom: 1px dashed #aaa; }
+    .zone-val:hover { background: #fffbe6; }
+    .zone-edit { display: none; }
+    .zone-edit input { width: 90px; padding: 2px 4px; font-size: .9em; }
+    .zone-edit button { padding: 2px 6px; font-size: .85em; cursor: pointer; }
+    .z2m-badge { font-size: .7em; color: #1a73e8; margin-left: 4px; }
   </style>
 </head>
 <body>
@@ -730,8 +760,15 @@ def dashboard():
     <tbody>
       {% for s in sonoff %}
       <tr>
-        <td>{{ s.friendly_name or s.ieee_address }}</td>
-        <td>{{ s.zone or "-" }}</td>
+        <td>{{ s.friendly_name or s.ieee_address }}{% if s.name_source == 'z2m' %}<span class="z2m-badge" title="Name from Zigbee2MQTT">z2m</span>{% endif %}</td>
+        <td class="zone-cell" id="zc-{{ s.ieee_address }}">
+          <span class="zone-val" onclick="zoneEdit('{{ s.ieee_address }}','{{ s.zone or '' }}')" title="Click to edit zone">{{ s.zone or "-" }}</span>
+          <span class="zone-edit">
+            <input type="text" placeholder="e.g. Zone 1">
+            <button onclick="zoneSave('{{ s.ieee_address }}')">&#10003;</button>
+            <button onclick="zoneCancel('{{ s.ieee_address }}')">&#10007;</button>
+          </span>
+        </td>
         <td>{{ s.timestamp }}</td>
         <td>{% if s.temperature_c is not none %}{{ "%.1f"|format(s.temperature_c) }}{% else %}-{% endif %}</td>
         <td>{% if s.humidity_pct is not none %}{{ "%.1f"|format(s.humidity_pct) }}{% else %}-{% endif %}</td>
@@ -768,7 +805,14 @@ def dashboard():
       {% for h in hive %}
       <tr>
         <td>{{ h.friendly_name or h.ieee_address }}</td>
-        <td>{{ h.zone or "-" }}</td>
+        <td class="zone-cell" id="zc-{{ h.ieee_address }}">
+          <span class="zone-val" onclick="zoneEdit('{{ h.ieee_address }}','{{ h.zone or '' }}')" title="Click to edit zone">{{ h.zone or "-" }}</span>
+          <span class="zone-edit">
+            <input type="text" placeholder="e.g. Zone 1">
+            <button onclick="zoneSave('{{ h.ieee_address }}')">&#10003;</button>
+            <button onclick="zoneCancel('{{ h.ieee_address }}')">&#10007;</button>
+          </span>
+        </td>
         <td>{{ h.timestamp }}</td>
         <td>{% if h.temperature_c is not none %}{{ "%.1f"|format(h.temperature_c) }}{% else %}-{% endif %}</td>
         <td>{% if h.target_temp_c is not none %}{{ "%.1f"|format(h.target_temp_c) }}{% else %}-{% endif %}</td>
@@ -817,7 +861,14 @@ def dashboard():
       {% for s in shelly %}
       <tr>
         <td>{{ s.friendly_name or s.ieee_address }}</td>
-        <td>{{ s.zone or "-" }}</td>
+        <td class="zone-cell" id="zc-{{ s.ieee_address }}">
+          <span class="zone-val" onclick="zoneEdit('{{ s.ieee_address }}','{{ s.zone or '' }}')" title="Click to edit zone">{{ s.zone or "-" }}</span>
+          <span class="zone-edit">
+            <input type="text" placeholder="e.g. Zone 5">
+            <button onclick="zoneSave('{{ s.ieee_address }}')">&#10003;</button>
+            <button onclick="zoneCancel('{{ s.ieee_address }}')">&#10007;</button>
+          </span>
+        </td>
         <td>{{ s.timestamp }}</td>
         <td>{% if s.temperature_c is not none %}{{ "%.1f"|format(s.temperature_c) }}{% else %}-{% endif %}</td>
         <td>{% if s.humidity_pct is not none %}{{ "%.1f"|format(s.humidity_pct) }}{% else %}-{% endif %}</td>
@@ -838,6 +889,36 @@ def dashboard():
       {% endfor %}
     </tbody>
   </table>
+<script>
+function zoneEdit(ieee, currentZone) {
+  var cell = document.getElementById('zc-' + ieee);
+  var val = cell.querySelector('.zone-val');
+  var editDiv = cell.querySelector('.zone-edit');
+  var inp = editDiv.querySelector('input');
+  inp.value = currentZone === '-' ? '' : currentZone;
+  val.style.display = 'none';
+  editDiv.style.display = 'inline';
+  inp.focus();
+}
+function zoneSave(ieee) {
+  var cell = document.getElementById('zc-' + ieee);
+  var inp = cell.querySelector('.zone-edit input');
+  var newZone = inp.value.trim() || null;
+  fetch('/api/sensors/' + encodeURIComponent(ieee) + '/zone', {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({zone: newZone})
+  }).then(function(r){ return r.json(); }).then(function(d){
+    if (d.ok) { location.reload(); }
+    else { alert('Failed: ' + d.error); }
+  });
+}
+function zoneCancel(ieee) {
+  var cell = document.getElementById('zc-' + ieee);
+  cell.querySelector('.zone-val').style.display = '';
+  cell.querySelector('.zone-edit').style.display = 'none';
+}
+</script>
 </body>
 </html>
 """
