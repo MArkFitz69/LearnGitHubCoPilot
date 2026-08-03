@@ -47,6 +47,16 @@ def _normalise_ieee(ieee_raw: str) -> str:
     return addr
 
 
+def _looks_like_ieee(value: str) -> bool:
+    addr = value.lower().strip()
+    if addr.startswith("0x"):
+        addr = addr[2:]
+    if ":" in addr:
+        parts = addr.split(":")
+        return len(parts) == 8 and all(len(p) == 2 for p in parts)
+    return len(addr) == 16
+
+
 class Z2MSensorReading:
     """Sensor reading parsed from a zigbee2mqtt MQTT message."""
 
@@ -195,7 +205,20 @@ class Z2MReader:
         if temp is None and humidity is None:
             return
 
-        ieee = self._ieee_by_name.get(friendly_name, friendly_name)
+        ieee = self._ieee_by_name.get(friendly_name)
+        if not ieee:
+            raw_ieee = (data.get("device") or {}).get("ieee_address")
+            if raw_ieee:
+                ieee = _normalise_ieee(str(raw_ieee))
+                self._ieee_by_name[friendly_name] = ieee
+            elif _looks_like_ieee(friendly_name):
+                ieee = _normalise_ieee(friendly_name)
+            else:
+                logger.debug(
+                    "z2m skipping reading for unknown device name %r until bridge/devices maps it",
+                    friendly_name,
+                )
+                return
         model = (
             self._model_by_ieee.get(ieee)
             or (data.get("device") or {}).get("model")

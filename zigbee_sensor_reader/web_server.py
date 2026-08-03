@@ -118,6 +118,19 @@ def _zone_sort_key(zone: str | None) -> tuple[int, str]:
     return (999, zone)
 
 
+def _is_plug_row(ieee_address: str, model: str | None, friendly_name: str | None) -> bool:
+    """Heuristic to classify smart plugs into their own dashboard section."""
+    model_l = (model or "").lower()
+    name_l = (friendly_name or "").lower()
+    if model_l.startswith("ts011f"):
+        return True
+    if "plug" in model_l or "socket" in model_l:
+        return True
+    if "plug" in name_l or "socket" in name_l:
+        return True
+    return False
+
+
 def _get_system_info() -> dict:
     """
     Gather Pi hardware stats, service status, and database metrics.
@@ -361,10 +374,10 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
                s.zone_override, s.name_source
         FROM readings r
         INNER JOIN (
-            SELECT ieee_address, MAX(timestamp) AS max_ts
+            SELECT ieee_address, MAX(id) AS max_id
             FROM readings
             GROUP BY ieee_address
-        ) latest ON r.ieee_address = latest.ieee_address AND r.timestamp = latest.max_ts
+        ) latest ON r.id = latest.max_id
         LEFT JOIN sensors s ON r.ieee_address = s.ieee_address
         ORDER BY s.friendly_name
         """
@@ -391,6 +404,7 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
     shelly = []
     hive = []
     hotwater = []
+    plugs = []
 
     for row in latest_rows:
         ieee_address = row["ieee_address"]
@@ -457,7 +471,9 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
             "device_max_temp_c": latest.get("device_max_temp_c"),
         }
 
-        if model.startswith("SNZB-02"):
+        if _is_plug_row(ieee_address, model, latest.get("friendly_name")):
+            plugs.append(sensor_row)
+        elif model.startswith("SNZB-02"):
             sonoff.append(sensor_row)
         elif ieee_address.startswith("shelly:") or model == "Shelly Blu H&T":
             shelly.append(sensor_row)
@@ -465,10 +481,11 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
             # Any other Zigbee sensor (unknown model, other Sonoff models, etc.)
             sonoff.append(sensor_row)
 
-    sonoff.sort(key=lambda row: (_zone_sort_key(row.get("zone")), row.get("friendly_name") or row.get("ieee_address")))
-    hive.sort(key=lambda row: (_zone_sort_key(row.get("zone")), row.get("friendly_name") or row.get("ieee_address")))
+    sonoff.sort(key=lambda row: (_zone_sort_key(row.get("zone")), (row.get("friendly_name") or row.get("ieee_address") or "").lower()))
+    hive.sort(key=lambda row: (_zone_sort_key(row.get("zone")), (row.get("friendly_name") or row.get("ieee_address") or "").lower()))
     hotwater.sort(key=lambda row: (row.get("friendly_name") or row.get("ieee_address")))
-    shelly.sort(key=lambda row: (_zone_sort_key(row.get("zone")), row.get("friendly_name") or row.get("ieee_address")))
+    shelly.sort(key=lambda row: (_zone_sort_key(row.get("zone")), (row.get("friendly_name") or row.get("ieee_address") or "").lower()))
+    plugs.sort(key=lambda row: (_zone_sort_key(row.get("zone")), (row.get("friendly_name") or row.get("ieee_address") or "").lower()))
 
     return {
         "date_local": today_local,
@@ -480,6 +497,7 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
         "shelly": shelly,
         "hive": hive,
         "hotwater": hotwater,
+        "plugs": plugs,
     }
 
 
@@ -890,6 +908,37 @@ def dashboard():
         </td>
       </tr>
       {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Hive Plugs</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Plug</th><th>Zone</th><th>Timestamp</th><th>Temp (&deg;C)</th><th>Humidity (%)</th><th>Battery (%)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in plugs %}
+      <tr>
+        <td>{{ p.friendly_name or p.ieee_address }}{% if p.name_source == 'z2m' %}<span class="z2m-badge" title="Name from Zigbee2MQTT">z2m</span>{% endif %}</td>
+        <td class="zone-cell" id="zc-{{ p.ieee_address }}">
+          <span class="zone-val" onclick="zoneEdit('{{ p.ieee_address }}','{{ p.zone or '' }}')" title="Click to edit zone">{{ p.zone or "-" }}</span>
+          <span class="zone-edit">
+            <input type="text" placeholder="e.g. Zone 1">
+            <button onclick="zoneSave('{{ p.ieee_address }}')">&#10003;</button>
+            <button onclick="zoneCancel('{{ p.ieee_address }}')">&#10007;</button>
+          </span>
+        </td>
+        <td>{{ p.timestamp }}</td>
+        <td>{% if p.temperature_c is not none %}{{ "%.1f"|format(p.temperature_c) }}{% else %}-{% endif %}</td>
+        <td>{% if p.humidity_pct is not none %}{{ "%.1f"|format(p.humidity_pct) }}{% else %}-{% endif %}</td>
+        <td>{% if p.battery_pct is not none %}{{ "%.0f"|format(p.battery_pct) }}%{% else %}-{% endif %}</td>
+      </tr>
+      {% endfor %}
+      {% if not plugs %}
+      <tr><td colspan="6" style="color:#999">No plug data</td></tr>
+      {% endif %}
     </tbody>
   </table>
 <script>
