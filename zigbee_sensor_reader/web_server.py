@@ -314,7 +314,7 @@ def _calculate_hive_runtime_seconds(conn: sqlite3.Connection, day: str) -> dict:
         """
         SELECT ieee_address, timestamp, heating_on
         FROM readings
-        WHERE ieee_address LIKE 'hive:%'
+        WHERE (ieee_address LIKE 'hive:%' OR ieee_address LIKE 'hive-hw:%')
           AND substr(timestamp, 1, 10) = ?
         ORDER BY ieee_address, timestamp
         """,
@@ -724,7 +724,7 @@ def dashboard():
     <thead>
       <tr>
         <th>Sensor</th><th>Zone</th><th>Timestamp</th><th>Temp (&deg;C)</th><th>Humidity (%)</th>
-        <th>Device Min/Max Temp (&deg;C)</th><th>Today Low/High Temp (&deg;C)</th><th>Today Low/High Humidity (%)</th>
+        <th>Battery (%)</th><th>Device Min/Max Temp (&deg;C)</th><th>Today Low/High Temp (&deg;C)</th><th>Today Low/High Humidity (%)</th>
       </tr>
     </thead>
     <tbody>
@@ -735,6 +735,7 @@ def dashboard():
         <td>{{ s.timestamp }}</td>
         <td>{% if s.temperature_c is not none %}{{ "%.1f"|format(s.temperature_c) }}{% else %}-{% endif %}</td>
         <td>{% if s.humidity_pct is not none %}{{ "%.1f"|format(s.humidity_pct) }}{% else %}-{% endif %}</td>
+        <td>{% if s.battery_pct is not none %}{{ "%.0f"|format(s.battery_pct) }}%{% else %}-{% endif %}</td>
         <td>
           {% if s.device_min_temp_c is not none and s.device_max_temp_c is not none %}
             {{ "%.1f"|format(s.device_min_temp_c) }} / {{ "%.1f"|format(s.device_max_temp_c) }}
@@ -760,7 +761,7 @@ def dashboard():
     <thead>
       <tr>
         <th>Thermostat</th><th>Zone</th><th>Timestamp</th><th>Current Temp (&deg;C)</th>
-        <th>Target Temp (&deg;C)</th><th>Mode</th><th>Status</th><th>Daily Runtime (HH:MM)</th>
+        <th>Target Temp (&deg;C)</th><th>Mode</th><th>Status</th><th>Battery (%)</th><th>Daily Runtime (HH:MM)</th>
       </tr>
     </thead>
     <tbody>
@@ -773,6 +774,7 @@ def dashboard():
         <td>{% if h.target_temp_c is not none %}{{ "%.1f"|format(h.target_temp_c) }}{% else %}-{% endif %}</td>
         <td>{{ h.heating_mode or "-" }}</td>
         <td class="status-{{ h.status }}">{{ h.status }}</td>
+        <td>{% if h.battery_pct is not none %}{{ "%.0f"|format(h.battery_pct) }}%{% else %}-{% endif %}</td>
         <td>{{ h.runtime_today_hhmm }}</td>
       </tr>
       {% endfor %}

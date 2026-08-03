@@ -112,9 +112,9 @@ async def fetch_hive_data() -> dict:
             friendly_name = HIVE_NAMES.get(hive_name, hive_name)
 
             try:
-                mode = await hive.hotwater.get_mode(dev)
-                state = await hive.hotwater.get_state(dev)
-                boost = await hive.hotwater.get_boost_status(dev)
+                mode = await hive.hotwater.getMode(dev)
+                state = await hive.hotwater.getState(dev)
+                boost = await hive.hotwater.getBoostStatus(dev)
 
                 hw_on = state not in ("OFF", None, False)
                 boost_active = boost not in ("OFF", None, False)
