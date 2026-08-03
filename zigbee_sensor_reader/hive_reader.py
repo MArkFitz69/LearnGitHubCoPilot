@@ -134,7 +134,7 @@ async def fetch_hive_data() -> dict:
             try:
                 get_mode_fn, _ = _try_hw(["getMode", "get_mode", "mode"], dev)
                 get_state_fn, _ = _try_hw(["getState", "get_state", "state"], dev)
-                get_boost_fn, _ = _try_hw(["getBoostStatus", "get_boost_status", "boostStatus"], dev)
+                get_boost_fn, _ = _try_hw(["getBoost", "getBoostStatus", "get_boost_status", "boostStatus"], dev)
 
                 mode = await get_mode_fn(dev) if get_mode_fn else None
                 state = await get_state_fn(dev) if get_state_fn else None

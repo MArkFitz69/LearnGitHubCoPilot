@@ -153,17 +153,16 @@ class Z2MReader:
 
             if self._get_conn:
                 try:
-                    from .database import upsert_sensor, set_sensor_zone_override
+                    from .database import upsert_sensor
                     conn = self._get_conn()
                     upsert_sensor(
                         conn,
                         ieee_address=ieee,
                         friendly_name=name,
                         model=model or None,
+                        zone=zone_from_desc or None,
                         name_source="z2m",
                     )
-                    if zone_from_desc:
-                        set_sensor_zone_override(conn, ieee, zone_from_desc)
                     updated += 1
                 except Exception as exc:
                     logger.warning("z2m DB sync failed for %s: %s", ieee, exc)
