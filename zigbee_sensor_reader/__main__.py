@@ -159,6 +159,14 @@ async def run_collector(pair: bool = False) -> None:
     try:
         await listener.start()
 
+        # Start Zigbee2MQTT name sync in the background (non-fatal if unavailable)
+        try:
+            from .z2m_sync import run_z2m_sync
+            asyncio.create_task(run_z2m_sync(lambda: conn))
+            logger.info("Zigbee2MQTT name sync task started")
+        except Exception as exc:
+            logger.warning("z2m sync task could not start: %s", exc)
+
         if pair:
             logger.info(
                 "Pairing mode: network is open for 120 seconds. "
