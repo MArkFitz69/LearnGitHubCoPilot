@@ -70,6 +70,9 @@ class Z2MSensorReading:
         battery_pct: float | None = None,
         link_quality: int | None = None,
         battery_voltage_mv: float | None = None,
+        state: str | None = None,
+        power_w: float | None = None,
+        energy_kwh: float | None = None,
     ):
         self.ieee_address = ieee_address
         self.friendly_name = friendly_name
@@ -79,11 +82,55 @@ class Z2MSensorReading:
         self.battery_pct = battery_pct
         self.link_quality = link_quality
         self.battery_voltage_mv = battery_voltage_mv
+        self.state = state
+        self.power_w = power_w
+        self.energy_kwh = energy_kwh
         # z2m doesn't expose device-reported daily min/max — computed from readings instead
         self.device_min_temp_c = None
         self.device_max_temp_c = None
         self.device_min_humidity_pct = None
         self.device_max_humidity_pct = None
+
+
+def _normalise_zone(value: str | None) -> str | None:
+    if value is None:
+        return None
+    zone = str(value).strip()
+    return zone or None
+
+
+def _extract_energy_kwh(data: dict) -> float | None:
+    candidates = [
+        data.get("energy"),
+        data.get("energy_kwh"),
+        data.get("consumption"),
+        data.get("consumption_kwh"),
+    ]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            value = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if value > 1000:
+            return value / 1000.0
+        return value
+
+    nested = data.get("metering")
+    if isinstance(nested, dict):
+        for key in ("energy", "sum", "total"):
+            candidate = nested.get(key)
+            if candidate is None:
+                continue
+            try:
+                value = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if value > 1000:
+                return value / 1000.0
+            return value
+    return None
 
 
 ReadingCallback = Callable[[Z2MSensorReading], None]
@@ -181,9 +228,12 @@ class Z2MReader:
                         ieee_address=ieee,
                         friendly_name=name,
                         model=model or None,
-                        zone=zone_from_desc or None,
+                        zone=_normalise_zone(zone_from_desc),
                         name_source="z2m",
                     )
+                    if zone_from_desc:
+                        from .database import set_sensor_zone_override
+                        set_sensor_zone_override(conn, ieee, _normalise_zone(zone_from_desc))
                     updated += 1
                 except Exception as exc:
                     logger.warning("z2m DB sync failed for %s: %s", ieee, exc)
@@ -199,10 +249,20 @@ class Z2MReader:
         if not isinstance(data, dict):
             return
 
-        # Must have at least temperature or humidity to be a sensor reading
         temp = data.get("temperature")
         humidity = data.get("humidity")
-        if temp is None and humidity is None:
+        state = data.get("state")
+        power = data.get("power")
+        link_quality = data.get("linkquality") or data.get("link_quality")
+        energy_kwh = _extract_energy_kwh(data)
+        if (
+            temp is None
+            and humidity is None
+            and state is None
+            and power is None
+            and energy_kwh is None
+            and link_quality is None
+        ):
             return
 
         ieee = self._ieee_by_name.get(friendly_name)
@@ -225,9 +285,10 @@ class Z2MReader:
         )
 
         battery = data.get("battery")
-        lqi = data.get("linkquality") or data.get("link_quality")
+        lqi = link_quality
         # z2m reports Sonoff voltage in mV directly
         voltage_mv = data.get("voltage")
+        zone = _normalise_zone((data.get("device") or {}).get("description"))
 
         reading = Z2MSensorReading(
             ieee_address=ieee,
@@ -238,13 +299,20 @@ class Z2MReader:
             battery_pct=float(battery) if battery is not None else None,
             link_quality=int(lqi) if lqi is not None else None,
             battery_voltage_mv=float(voltage_mv) if voltage_mv is not None else None,
+            state=str(state).lower() if state is not None else None,
+            power_w=float(power) if power is not None else None,
+            energy_kwh=energy_kwh,
         )
+        reading.zone = zone
 
         logger.info(
-            "z2m reading [%s]: temp=%s°C  hum=%s%%  battery=%s%%",
+            "z2m reading [%s]: temp=%s°C  hum=%s%%  state=%s  power=%sW  energy=%skWh  battery=%s%%",
             friendly_name,
             f"{temp:.1f}" if temp is not None else "-",
             f"{humidity:.1f}" if humidity is not None else "-",
+            reading.state or "-",
+            f"{reading.power_w:.2f}" if reading.power_w is not None else "-",
+            f"{reading.energy_kwh:.3f}" if reading.energy_kwh is not None else "-",
             f"{battery:.0f}" if battery is not None else "-",
         )
 

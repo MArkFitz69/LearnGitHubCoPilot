@@ -54,6 +54,9 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+POWER_BI_PATH = "/api/readings?format=csv"
+DOWNLOAD_PATH = "/api/export/csv"
+
 
 def get_db() -> sqlite3.Connection:
     """Get a read-only database connection."""
@@ -116,6 +119,20 @@ def _zone_sort_key(zone: str | None) -> tuple[int, str]:
         if suffix.isdigit():
             return (int(suffix), zone)
     return (999, zone)
+
+
+def _app_base_url() -> str:
+    host = request.host or "localhost:8080"
+    return f"{request.scheme}://{host}"
+
+
+def _page_links() -> dict[str, str]:
+    base_url = _app_base_url()
+    return {
+        "base_url": base_url,
+        "power_bi_url": f"{base_url}{POWER_BI_PATH}",
+        "download_url": f"{base_url}{DOWNLOAD_PATH}",
+    }
 
 
 def _is_plug_row(ieee_address: str, model: str | None, friendly_name: str | None) -> bool:
@@ -258,7 +275,7 @@ def _get_system_info() -> dict:
 
         # Per-sensor last seen and stale flag
         sensor_status = conn.execute("""
-            SELECT s.friendly_name, s.model, s.zone, r.last_ts,
+            SELECT s.friendly_name, s.model, COALESCE(s.zone_override, s.zone) AS zone, r.last_ts,
                    CAST((julianday('now','localtime') - julianday(r.last_ts)) * 1440 AS INTEGER) AS mins_ago
             FROM sensors s
             LEFT JOIN (
@@ -367,6 +384,7 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
         SELECT r.ieee_address, s.friendly_name, s.model, r.timestamp, r.reading_date, r.reading_time,
                r.temperature_c, r.humidity_pct, r.battery_pct,
                COALESCE(s.zone_override, r.zone) AS zone,
+               r.state, r.power_w, r.energy_kwh, r.link_quality,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
                r.device_min_temp_c, r.device_max_temp_c,
                r.device_min_humidity_pct, r.device_max_humidity_pct,
@@ -498,6 +516,7 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
         "hive": hive,
         "hotwater": hotwater,
         "plugs": plugs,
+        **_page_links(),
     }
 
 
@@ -575,6 +594,9 @@ def system_page():
     h1 { margin-bottom: 4px; }
     h2 { margin: 28px 0 8px; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
     .meta { color: #666; margin-bottom: 20px; font-size: .9em; }
+    .linkbar { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 12px 14px; margin-bottom: 18px; }
+    .pill { display: inline-block; margin-right: 12px; margin-bottom: 6px; }
+    .endpoint { font-family: Consolas, monospace; background: #f4f4f4; padding: 2px 6px; border-radius: 4px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px,1fr)); gap: 12px; }
     .card { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 14px 16px; }
     .card h3 { margin: 0 0 4px; font-size: .8em; color: #777; text-transform: uppercase; letter-spacing: .05em; }
@@ -595,6 +617,12 @@ def system_page():
 <body>
 <h1>&#128202; System Status</h1>
 <div class="meta">{{ gen }} &mdash; Auto-refresh 30s &nbsp;|&nbsp; <a href="/dashboard">&#127968; Dashboard</a> &nbsp;|&nbsp; <a href="/onboarding">&#128268; Onboarding</a></div>
+
+<div class="linkbar">
+  <div class="pill"><a href="{{ download_url }}">&#128229; Download CSV</a></div>
+  <div class="pill"><a href="/api/readings/latest?format=csv">&#128196; Latest readings CSV</a></div>
+  <div class="pill"><strong>Power BI URL:</strong> <span class="endpoint">{{ power_bi_url }}</span></div>
+</div>
 
 <h2>&#129303; Pi Hardware</h2>
 <div class="grid">
@@ -719,6 +747,7 @@ def system_page():
         cnt_hw=fmt(c.get("hotwater")),
         cnt_shelly=fmt(c.get("shelly")),
         sensors=info.get("sensor_status", []),
+        **_page_links(),
     )
 
 
@@ -748,10 +777,15 @@ def dashboard():
   <meta http-equiv="refresh" content="60">
   <title>Home Sensor Dashboard</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 20px; color: #222; }
+    body { font-family: Arial, sans-serif; margin: 20px; color: #222; background: #fafafa; }
     h1, h2 { margin-bottom: 8px; }
+    h2 { margin-top: 28px; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
     .meta { color: #666; margin-bottom: 16px; }
-    table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
+    .titlebar { margin-bottom: 18px; }
+    .linkbar { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 12px 14px; margin-bottom: 18px; }
+    .pill { display: inline-block; margin-right: 12px; margin-bottom: 6px; }
+    .endpoint { font-family: Consolas, monospace; background: #f4f4f4; padding: 2px 6px; border-radius: 4px; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 24px; background: #fff; }
     th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
     th { background: #f4f4f4; }
     .status-on { color: #0b7a0b; font-weight: bold; }
@@ -767,8 +801,17 @@ def dashboard():
   </style>
 </head>
 <body>
-  <h1>Home Sensor Dashboard</h1>
-  <div class="meta">Generated (Local): {{ generated_at_local or generated_at_utc }} | Auto-refresh: 60s | <a href="/system">System Status</a> | <a href="/onboarding">Sensor Onboarding</a></div>
+  <div class="titlebar">
+    <h1>&#127968; Home Sensor Dashboard</h1>
+    <div class="meta">Generated (Local): {{ generated_at_local or generated_at_utc }} | Auto-refresh: 60s | <a href="/system">&#128202; System Status</a> | <a href="/onboarding">&#128268; Sensor Onboarding</a></div>
+  </div>
+
+  <div class="linkbar">
+    <div class="pill"><a href="{{ download_url }}">&#128229; Download CSV</a></div>
+    <div class="pill"><a href="/api/dashboard">&#128200; Dashboard JSON</a></div>
+    <div class="pill"><a href="/api/readings/latest?format=csv">&#128196; Latest readings CSV</a></div>
+    <div class="pill"><strong>Power BI URL:</strong> <span class="endpoint">{{ power_bi_url }}</span></div>
+  </div>
 
   <h2>Sonoff Sensors (SNZB-02D / SNZB-02DR2)</h2>
   <table>
@@ -915,7 +958,7 @@ def dashboard():
   <table>
     <thead>
       <tr>
-        <th>Plug</th><th>Zone</th><th>Timestamp</th><th>Temp (&deg;C)</th><th>Humidity (%)</th><th>Battery (%)</th>
+        <th>Plug</th><th>Zone</th><th>Timestamp</th><th>State</th><th>Power (W)</th><th>Energy (kWh)</th><th>Link quality</th>
       </tr>
     </thead>
     <tbody>
@@ -931,13 +974,14 @@ def dashboard():
           </span>
         </td>
         <td>{{ p.timestamp }}</td>
-        <td>{% if p.temperature_c is not none %}{{ "%.1f"|format(p.temperature_c) }}{% else %}-{% endif %}</td>
-        <td>{% if p.humidity_pct is not none %}{{ "%.1f"|format(p.humidity_pct) }}{% else %}-{% endif %}</td>
-        <td>{% if p.battery_pct is not none %}{{ "%.0f"|format(p.battery_pct) }}%{% else %}-{% endif %}</td>
+        <td class="status-{{ p.state or 'off' }}">{{ p.state or "-" }}</td>
+        <td>{% if p.power_w is not none %}{{ "%.2f"|format(p.power_w) }}{% else %}-{% endif %}</td>
+        <td>{% if p.energy_kwh is not none %}{{ "%.3f"|format(p.energy_kwh) }}{% else %}-{% endif %}</td>
+        <td>{% if p.link_quality is not none %}{{ p.link_quality }}{% else %}-{% endif %}</td>
       </tr>
       {% endfor %}
       {% if not plugs %}
-      <tr><td colspan="6" style="color:#999">No plug data</td></tr>
+      <tr><td colspan="7" style="color:#999">No plug data</td></tr>
       {% endif %}
     </tbody>
   </table>
@@ -1001,8 +1045,8 @@ def onboarding_page():
   </style>
 </head>
 <body>
-  <h1>Sensor Onboarding</h1>
-  <div class="meta"><a href="/dashboard">Dashboard</a> | <a href="/system">System Status</a></div>
+  <h1>&#128268; Sensor Onboarding</h1>
+  <div class="meta"><a href="/dashboard">&#127968; Dashboard</a> | <a href="/system">&#128202; System Status</a></div>
 
   <div class="card">
     <h2>1) Unlock</h2>
@@ -1017,13 +1061,14 @@ def onboarding_page():
   </div>
 
   <div class="card">
-    <h2>2) Start pairing</h2>
-    <button onclick="startPairing()">Start 120s pairing window</button>
+    <h2>2) Start Zigbee2MQTT pairing</h2>
+    <div class="muted">This page asks Zigbee2MQTT to open a 120-second permit-join window. Devices are added in Zigbee2MQTT first, then synced into this logger.</div>
+    <button onclick="startPairing()">Start 120s Zigbee2MQTT pairing window</button>
     <div id="pairMsg" class="muted"></div>
   </div>
 
   <div class="card">
-    <h2>3) Detected sensor</h2>
+    <h2>3) Detected Zigbee2MQTT device</h2>
     <div>Candidate IEEE: <code id="candidateIeee">-</code></div>
     <div>Model: <code id="candidateModel">-</code></div>
     <div>Joined: <code id="candidateJoined">-</code></div>
@@ -1031,7 +1076,7 @@ def onboarding_page():
   </div>
 
   <div class="card">
-    <h2>4) Save name and zone</h2>
+    <h2>4) Sync name and zone into this logger</h2>
     <label>IEEE address</label><br>
     <input id="ieeeAddress" placeholder="a4:c1:38:.."><br>
     <label>Friendly name</label><br>
@@ -1096,7 +1141,7 @@ async function startPairing() {
     return;
   }
   document.getElementById("pairMsg").innerHTML =
-    `<span class="ok">Pairing started.</span> TCP before pairing: ${data.tcp_precheck_ok ? "OK" : "FAILED"} (${data.tcp_precheck_detail})`;
+    `<span class="ok">Zigbee2MQTT pairing started.</span> TCP before pairing: ${data.tcp_precheck_ok ? "OK" : "FAILED"} (${data.tcp_precheck_detail})`;
   refreshStatus();
 }
 
@@ -1350,7 +1395,7 @@ def api_readings():
     query = """
         SELECT r.ieee_address, s.friendly_name, r.timestamp, r.reading_date, r.reading_time,
                r.temperature_c, r.humidity_pct, r.battery_pct, r.battery_voltage_mv,
-               r.link_quality, r.rssi, r.zone,
+               r.link_quality, r.rssi, r.zone, r.state, r.power_w, r.energy_kwh,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
                r.device_min_temp_c, r.device_max_temp_c,
                r.device_min_humidity_pct, r.device_max_humidity_pct
@@ -1393,7 +1438,7 @@ def api_readings_latest():
     rows = conn.execute("""
         SELECT r.ieee_address, s.friendly_name, r.timestamp, r.reading_date, r.reading_time,
                r.temperature_c, r.humidity_pct, r.battery_pct, r.battery_voltage_mv,
-               r.link_quality, r.rssi, r.zone,
+               r.link_quality, r.rssi, r.zone, r.state, r.power_w, r.energy_kwh,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
                r.device_min_temp_c, r.device_max_temp_c,
                r.device_min_humidity_pct, r.device_max_humidity_pct
@@ -1425,7 +1470,7 @@ def api_export_csv():
     query = """
         SELECT r.ieee_address, s.friendly_name, r.timestamp, r.reading_date, r.reading_time,
                r.temperature_c, r.humidity_pct, r.battery_pct, r.battery_voltage_mv,
-               r.link_quality, r.rssi, r.zone,
+               r.link_quality, r.rssi, r.zone, r.state, r.power_w, r.energy_kwh,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
                r.device_min_temp_c, r.device_max_temp_c,
                r.device_min_humidity_pct, r.device_max_humidity_pct

@@ -17,7 +17,13 @@ import time
 from .config import POLLING_INTERVAL, SENSOR_NAMES, ZONES
 from .database import get_connection, insert_reading, upsert_sensor
 from .export import export_to_csv, export_to_excel, get_sensor_summary
-from .onboarding import record_first_reading
+from .onboarding import (
+    fetch_pending_commands,
+    mark_command_done,
+    mark_command_failed,
+    record_first_reading,
+    set_pairing_state,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,6 +47,8 @@ def handle_reading(reading, conn) -> None:
     zone = ZONES.get(reading.ieee_address)
     if not zone and existing:
         zone = existing["zone_override"] or existing["zone"]
+    if getattr(reading, "zone", None):
+        zone = reading.zone
     friendly_name = reading.friendly_name
     if (not friendly_name or friendly_name == reading.ieee_address) and existing:
         friendly_name = existing["friendly_name"] or reading.friendly_name
@@ -60,6 +68,9 @@ def handle_reading(reading, conn) -> None:
         battery_pct=reading.battery_pct,
         link_quality=reading.link_quality,
         zone=zone,
+        state=getattr(reading, "state", None),
+        power_w=getattr(reading, "power_w", None),
+        energy_kwh=getattr(reading, "energy_kwh", None),
         device_min_temp_c=getattr(reading, "device_min_temp_c", None),
         device_max_temp_c=getattr(reading, "device_max_temp_c", None),
         device_min_humidity_pct=getattr(reading, "device_min_humidity_pct", None),
@@ -77,6 +88,12 @@ def handle_reading(reading, conn) -> None:
         parts.append(f"Humidity: {reading.humidity_pct:.1f}%")
     if reading.battery_pct is not None:
         parts.append(f"Battery: {reading.battery_pct:.0f}%")
+    if getattr(reading, "state", None):
+        parts.append(f"State: {reading.state}")
+    if getattr(reading, "power_w", None) is not None:
+        parts.append(f"Power: {reading.power_w:.2f}W")
+    if getattr(reading, "energy_kwh", None) is not None:
+        parts.append(f"Energy: {reading.energy_kwh:.3f}kWh")
     bv = getattr(reading, "battery_voltage_mv", None)
     if bv is not None:
         parts.append(f"V: {bv/1000:.2f}V")
@@ -85,6 +102,55 @@ def handle_reading(reading, conn) -> None:
     if dmin is not None and dmax is not None:
         parts.append(f"Device min/max: {dmin:.1f}/{dmax:.1f}°C")
     print("  ".join(parts))
+
+
+def _process_onboarding_commands(conn) -> None:
+    rows = fetch_pending_commands(conn)
+    if not rows:
+        return
+    for row in rows:
+        command_id = row["id"]
+        command = row["command"]
+        try:
+            if command == "start_pairing":
+                from .z2m_reader import Z2M_MQTT_HOST, Z2M_MQTT_PASS, Z2M_MQTT_PORT, Z2M_MQTT_TRANSPORT, Z2M_MQTT_USER, Z2M_TOPIC_PREFIX
+                import paho.mqtt.client as mqtt
+
+                completed = {"ok": False}
+
+                def on_connect(client, userdata, flags, rc):
+                    if rc != 0:
+                        completed["error"] = f"MQTT connect failed rc={rc}"
+                        return
+                    result = client.publish(
+                        f"{Z2M_TOPIC_PREFIX}/bridge/request/permit_join",
+                        '{"value": true, "time": 120}',
+                        qos=0,
+                    )
+                    if result.rc != 0:
+                        completed["error"] = f"permit_join publish failed rc={result.rc}"
+                        return
+                    completed["ok"] = True
+
+                client = mqtt.Client(transport=Z2M_MQTT_TRANSPORT)
+                client.on_connect = on_connect
+                if Z2M_MQTT_USER:
+                    client.username_pw_set(Z2M_MQTT_USER, Z2M_MQTT_PASS)
+                client.connect(Z2M_MQTT_HOST, Z2M_MQTT_PORT, keepalive=60)
+                client.loop_start()
+                time.sleep(2)
+                client.loop_stop()
+                client.disconnect()
+
+                if not completed.get("ok"):
+                    raise RuntimeError(completed.get("error", "permit_join was not acknowledged"))
+
+                set_pairing_state(conn, active=True, duration_seconds=120)
+                mark_command_done(conn, command_id)
+            else:
+                mark_command_failed(conn, command_id, f"Unsupported onboarding command: {command}")
+        except Exception as exc:
+            mark_command_failed(conn, command_id, str(exc))
 
 
 async def run_collector(pair: bool = False) -> None:
@@ -128,8 +194,10 @@ async def run_collector(pair: bool = False) -> None:
             await asyncio.sleep(1)
             now = time.monotonic()
             if now < next_poll:
+                _process_onboarding_commands(conn)
                 continue
             next_poll = now + POLLING_INTERVAL
+            _process_onboarding_commands(conn)
 
             # Poll Hive thermostats + hot water
             try:
