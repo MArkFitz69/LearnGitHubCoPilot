@@ -111,11 +111,13 @@ def _format_duration_hhmm(seconds: float) -> str:
 
 
 def _zone_sort_key(zone: str | None) -> tuple[int, str]:
-    """Sort zones naturally (Zone 1, Zone 2, ...)."""
+    """Sort zones naturally (Zone 1, Zone1, Zone 2, …)."""
     if not zone:
         return (999, "")
-    if zone.lower().startswith("zone "):
-        suffix = zone[5:].strip()
+    z = zone.lower().strip()
+    # Accept both "zone 1" (with space) and "zone1" (no space)
+    if z.startswith("zone"):
+        suffix = z[4:].strip()
         if suffix.isdigit():
             return (int(suffix), zone)
     return (999, zone)
