@@ -282,7 +282,7 @@ def _get_system_info() -> dict:
                 SELECT ieee_address, MAX(timestamp) as last_ts
                 FROM readings GROUP BY ieee_address
             ) r ON s.ieee_address = r.ieee_address
-            ORDER BY s.zone, s.friendly_name
+            ORDER BY COALESCE(s.zone_override, s.zone), s.friendly_name
         """).fetchall()
         info["sensor_status"] = [dict(row) for row in sensor_status]
 
@@ -383,7 +383,7 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
         """
         SELECT r.ieee_address, s.friendly_name, s.model, r.timestamp, r.reading_date, r.reading_time,
                r.temperature_c, r.humidity_pct, r.battery_pct,
-               COALESCE(s.zone_override, r.zone) AS zone,
+               COALESCE(s.zone_override, s.zone, r.zone) AS zone,
                r.state, r.power_w, r.energy_kwh, r.link_quality,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
                r.device_min_temp_c, r.device_max_temp_c,
@@ -1369,7 +1369,7 @@ def api_sensors():
     """List all registered sensors."""
     conn = get_db()
     rows = conn.execute(
-        "SELECT ieee_address, friendly_name, model, zone, first_seen, last_seen "
+        "SELECT ieee_address, friendly_name, model, COALESCE(zone_override, zone) AS zone, first_seen, last_seen "
         "FROM sensors ORDER BY friendly_name"
     ).fetchall()
     conn.close()
@@ -1415,7 +1415,7 @@ def api_readings():
         query += " AND r.ieee_address = ?"
         params.append(sensor)
     if zone:
-        query += " AND r.zone = ?"
+        query += " AND COALESCE(s.zone_override, r.zone) = ?"
         params.append(zone)
 
     query += " ORDER BY r.timestamp DESC LIMIT ?"
@@ -1487,7 +1487,7 @@ def api_export_csv():
         query += " AND r.timestamp <= ?"
         params.append(end)
     if zone:
-        query += " AND r.zone = ?"
+        query += " AND COALESCE(s.zone_override, r.zone) = ?"
         params.append(zone)
 
     query += " ORDER BY r.timestamp ASC"
