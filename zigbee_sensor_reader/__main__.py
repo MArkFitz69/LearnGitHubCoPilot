@@ -14,7 +14,13 @@ import asyncio
 import logging
 import time
 
-from .config import POLLING_INTERVAL, SENSOR_NAMES, ZONES
+from .config import (
+    ESP32_SENSOR_NAMES,
+    ESP32_SENSOR_ZONES,
+    POLLING_INTERVAL,
+    SENSOR_NAMES,
+    ZONES,
+)
 from .database import get_connection, insert_reading, upsert_sensor
 from .export import export_to_csv, export_to_excel, get_sensor_summary
 from .onboarding import (
@@ -40,7 +46,7 @@ def _get_sensor_metadata(conn, ieee_address: str):
     ).fetchone()
 
 
-def handle_reading(reading, conn) -> None:
+def handle_reading(reading, conn) -> bool:
     """Process an incoming sensor reading: store in DB and print to console."""
     existing = _get_sensor_metadata(conn, reading.ieee_address)
     # Use zone_override (set by z2m description or dashboard) first, then sensors.zone, then config
@@ -60,7 +66,7 @@ def handle_reading(reading, conn) -> None:
         zone=zone,
     )
 
-    insert_reading(
+    stored = insert_reading(
         conn,
         ieee_address=reading.ieee_address,
         temperature_c=reading.temperature_c,
@@ -76,7 +82,15 @@ def handle_reading(reading, conn) -> None:
         device_min_humidity_pct=getattr(reading, "device_min_humidity_pct", None),
         device_max_humidity_pct=getattr(reading, "device_max_humidity_pct", None),
         battery_voltage_mv=getattr(reading, "battery_voltage_mv", None),
+        packet_id=getattr(reading, "packet_id", None),
     )
+    if not stored:
+        logger.debug(
+            "Skipped duplicate packet %s for %s",
+            getattr(reading, "packet_id", None),
+            reading.ieee_address,
+        )
+        return False
     record_first_reading(conn, reading.ieee_address)
 
     parts = [f"[{friendly_name}]"]
@@ -102,6 +116,7 @@ def handle_reading(reading, conn) -> None:
     if dmin is not None and dmax is not None:
         parts.append(f"Device min/max: {dmin:.1f}/{dmax:.1f}°C")
     print("  ".join(parts))
+    return True
 
 
 def _process_onboarding_commands(conn) -> None:
@@ -161,6 +176,15 @@ async def run_collector(pair: bool = False) -> None:
     # Seed any pre-configured sensor names (config.py fallback, z2m will overwrite)
     for ieee, name in SENSOR_NAMES.items():
         upsert_sensor(conn, ieee_address=ieee, friendly_name=name, zone=ZONES.get(ieee))
+    from .esp32_mqtt_reader import sensor_identity
+    for sensor_key, name in ESP32_SENSOR_NAMES.items():
+        upsert_sensor(
+            conn,
+            ieee_address=sensor_identity(sensor_key),
+            friendly_name=name,
+            model="Shelly Blu H&T" if sensor_key == "shelly_raw_payload" else "ESP32 Dallas Temperature",
+            zone=ESP32_SENSOR_ZONES.get(sensor_key),
+        )
 
     if pair:
         logger.info(
@@ -187,6 +211,20 @@ async def run_collector(pair: bool = False) -> None:
         logger.info("Zigbee2MQTT sensor reader started")
     except Exception as exc:
         logger.error("Could not start z2m reader: %s", exc)
+
+    esp32_conn = get_connection()
+    try:
+        from .esp32_mqtt_reader import run_esp32_mqtt_reader
+        asyncio.create_task(
+            run_esp32_mqtt_reader(
+                on_reading=lambda reading: handle_reading(reading, esp32_conn),
+            )
+        )
+        logger.info("ESP32 MQTT sensor reader started")
+    except Exception as exc:
+        esp32_conn.close()
+        esp32_conn = None
+        logger.error("Could not start ESP32 MQTT reader: %s", exc)
 
     try:
         next_poll = 0.0
@@ -220,6 +258,8 @@ async def run_collector(pair: bool = False) -> None:
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
+        if esp32_conn is not None:
+            esp32_conn.close()
         conn.close()
 
 

@@ -87,14 +87,46 @@ ZONES: dict[str, str] = {
     "f4:b3:b1:ff:fe:61:1b:f3": "Zone 3",  # Stellas Room
     "f4:b3:b1:ff:fe:5e:09:d8": "Zone 3",  # Games Room
     "Thermostat 6": "Zone 3",              # Top Floor Landing thermostat
-    # Zone 5 - Attic
-    "94:B2:16:08:82:98": "Zone 5",         # Attic (Shelly Blu H&T)
+    # Zone 4 - Outdoor
+    "94:B2:16:08:82:98": "Zone 4",          # Outdoor (Shelly Blu H&T)
 }
 
 # Shelly Blu H&T sensors (keyed by BLE MAC address, uppercase with colons)
 # Run `python -m zigbee_sensor_reader --discover-shelly` to find MAC addresses
 SHELLY_SENSORS: dict[str, str] = {
-    "94:B2:16:08:82:98": "Attic",
+    "94:B2:16:08:82:98": "Outdoor",
+}
+
+# ESP32 MQTT sensor feed. The reader uses the Zigbee2MQTT broker connection
+# settings by default; only the ESPHome node/topic prefix normally needs to be
+# changed.
+ESP32_TOPIC_PREFIX = (
+    os.environ.get("ESP32_TOPIC_PREFIX", "heating-esp").strip("/") or "heating-esp"
+)
+
+# Canonical sensor keys and visible names. The firmware topic typo
+# "bolier_1_return" is mapped to the canonical "boiler1_return" identity by the
+# MQTT reader.
+ESP32_SENSOR_NAMES: dict[str, str] = {
+    "boiler1_out": "Boiler 1 Out",
+    "boiler1_return": "Boiler 1 Return",
+    "boiler2_out": "Boiler 2 Out",
+    "boiler2_return": "Boiler 2 Return",
+    "shelly_raw_payload": "Outdoor",
+}
+
+# Optional zone defaults for the ESP32-fed sensors. Set only the values that
+# are useful for your installation, for example ESP32_ZONE_BOILER1_OUT=Zone 1.
+ESP32_SENSOR_ZONES: dict[str, str] = {
+    key: value
+    for key, value in {
+        "boiler1_out": os.environ.get("ESP32_ZONE_BOILER1_OUT", ""),
+        "boiler1_return": os.environ.get("ESP32_ZONE_BOILER1_RETURN", ""),
+        "boiler2_out": os.environ.get("ESP32_ZONE_BOILER2_OUT", ""),
+        "boiler2_return": os.environ.get("ESP32_ZONE_BOILER2_RETURN", ""),
+        "shelly_raw_payload": os.environ.get("ESP32_ZONE_SHELLY", "Zone 4"),
+    }.items()
+    if value.strip()
 }
 
 # BLE scan duration for Shelly sensors (seconds)

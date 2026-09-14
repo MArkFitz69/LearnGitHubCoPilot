@@ -1,5 +1,5 @@
 [Unit]
-Description=Zigbee Sensor Data Collector
+Description=Zigbee, ESP32 MQTT, Hive, and BLE Sensor Data Collector
 After=network.target
 
 [Service]
@@ -13,6 +13,15 @@ Environment=ZIGBEE_HOST=192.168.1.59
 Environment=ZIGBEE_PORT=6638
 Environment=HIVE_USERNAME=your-hive-email@example.com
 Environment=HIVE_PASSWORD=your-hive-password
+# ESP32 feed uses the Z2M broker values by default.
+Environment=ESP32_TOPIC_PREFIX=heating-esp
+Environment="ESP32_ZONE_SHELLY=Zone 4"
+# Optional independent broker overrides:
+# Environment=ESP32_MQTT_HOST=home-logger
+# Environment=ESP32_MQTT_PORT=8081
+# Environment=ESP32_MQTT_TRANSPORT=websockets
+# Environment=ESP32_MQTT_USER=
+# Environment=ESP32_MQTT_PASS=
 # Shelly BLE scan window (seconds) — sensor advertises every 3-10 mins
 Environment=SHELLY_SCAN_DURATION=120
 

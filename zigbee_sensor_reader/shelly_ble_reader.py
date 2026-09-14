@@ -39,22 +39,27 @@ BTHOME_OBJECTS = {
 }
 
 
-def parse_bthome_payload(data: bytes) -> dict:
+class BTHomePayloadError(ValueError):
+    """Raised when a BTHome payload cannot be decoded safely."""
+
+
+def decode_bthome_v2_payload(data: bytes) -> dict:
     """
-    Parse BTHome v2 service data payload.
+    Decode an unencrypted BTHome v2 service-data payload.
 
     The first byte is the device info byte (encryption flag, version).
     Remaining bytes are object_id + value pairs.
     """
     if len(data) < 2:
-        return {}
+        raise BTHomePayloadError("payload is too short")
 
     # First byte: device info (bit 0 = encryption, bits 5-7 = version)
     device_info = data[0]
-    encrypted = bool(device_info & 0x01)
-    if encrypted:
-        logger.debug("Encrypted BTHome payload, skipping")
-        return {}
+    if device_info & 0x01:
+        raise BTHomePayloadError("encrypted BTHome payloads are not supported")
+    version = (device_info >> 5) & 0x07
+    if version != 2:
+        raise BTHomePayloadError(f"unsupported BTHome version {version}")
 
     results = {}
     i = 1  # skip device info byte
@@ -64,13 +69,14 @@ def parse_bthome_payload(data: bytes) -> dict:
         i += 1
 
         if obj_id not in BTHOME_OBJECTS:
-            # Unknown object — try to skip (can't know length, so stop)
-            break
+            raise BTHomePayloadError(f"unsupported BTHome object 0x{obj_id:02x}")
 
         name, length, scale, signed = BTHOME_OBJECTS[obj_id]
 
         if i + length > len(data):
-            break
+            raise BTHomePayloadError(
+                f"truncated BTHome object 0x{obj_id:02x}: expected {length} byte(s)"
+            )
 
         if length == 1:
             value = data[i]
@@ -83,10 +89,33 @@ def parse_bthome_payload(data: bytes) -> dict:
             i += length
             continue
 
-        results[name] = value * scale
+        results[name] = value if scale == 1 else value * scale
         i += length
 
+    if not results:
+        raise BTHomePayloadError("payload contains no supported BTHome objects")
     return results
+
+
+def parse_bthome_payload(data: bytes) -> dict:
+    """Compatibility wrapper used by BLE scanning; invalid payloads are skipped."""
+    try:
+        return decode_bthome_v2_payload(data)
+    except BTHomePayloadError as exc:
+        logger.warning("Ignoring malformed BTHome payload: %s", exc)
+        return {}
+
+
+def decode_bthome_v2_hex(payload: str) -> dict:
+    """Decode compact or whitespace-separated BTHome v2 hexadecimal text."""
+    text = payload.strip()
+    if not text:
+        raise BTHomePayloadError("hex payload is empty")
+    try:
+        data = bytes.fromhex(text)
+    except ValueError as exc:
+        raise BTHomePayloadError(f"invalid hexadecimal payload: {exc}") from exc
+    return decode_bthome_v2_payload(data)
 
 
 async def discover_shelly_sensors(scan_duration: float = 30.0) -> list[dict]:
@@ -208,7 +237,7 @@ async def poll_shelly_ble(scan_duration: float = 60.0) -> list[dict]:
             zone=zone,
         )
 
-        insert_reading(
+        was_stored = insert_reading(
             conn,
             ieee_address=ieee_address,
             temperature_c=data.get("temperature"),
@@ -217,7 +246,15 @@ async def poll_shelly_ble(scan_duration: float = 60.0) -> list[dict]:
             zone=zone,
             battery_voltage_mv=data.get("voltage") * 1000 if data.get("voltage") is not None else None,
             rssi=data.get("rssi"),
+            packet_id=int(data["packet_id"]) if data.get("packet_id") is not None else None,
         )
+        if not was_stored:
+            logger.debug(
+                "Skipping duplicate Shelly packet %s for %s",
+                data.get("packet_id"),
+                mac,
+            )
+            continue
 
         stored.append(data)
         logger.info(

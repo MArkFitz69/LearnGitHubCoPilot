@@ -38,7 +38,13 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template_string, request
 
-from .config import DATABASE_PATH, SHELLY_SENSORS, ZIGBEE_HOST, ZIGBEE_PORT
+from .config import (
+    DATABASE_PATH,
+    ESP32_SENSOR_NAMES,
+    SHELLY_SENSORS,
+    ZIGBEE_HOST,
+    ZIGBEE_PORT,
+)
 from .database import get_connection
 from .onboarding import (
     create_temp_passcode,
@@ -148,6 +154,24 @@ def _is_plug_row(ieee_address: str, model: str | None, friendly_name: str | None
     if "plug" in name_l or "socket" in name_l:
         return True
     return False
+
+
+def _get_reading_type_counts(conn: sqlite3.Connection) -> dict:
+    """Count readings by source without folding ESP32 probes into Zigbee."""
+    row = conn.execute("""
+        SELECT
+            SUM(CASE WHEN ieee_address LIKE 'hive-hw:%' THEN 1 ELSE 0 END) as hotwater,
+            SUM(CASE WHEN ieee_address LIKE 'hive:%' AND ieee_address NOT LIKE 'hive-hw:%' THEN 1 ELSE 0 END) as hive,
+            SUM(CASE WHEN ieee_address LIKE 'shelly:%' THEN 1 ELSE 0 END) as shelly,
+            SUM(CASE WHEN ieee_address LIKE 'esp32:%' THEN 1 ELSE 0 END) as esp32,
+            SUM(CASE
+                WHEN ieee_address NOT LIKE 'hive%'
+                 AND ieee_address NOT LIKE 'shelly:%'
+                 AND ieee_address NOT LIKE 'esp32:%'
+                THEN 1 ELSE 0 END) as zigbee
+        FROM readings
+    """).fetchone()
+    return dict(row)
 
 
 def _get_system_info() -> dict:
@@ -265,15 +289,7 @@ def _get_system_info() -> dict:
         info["db_first_reading"] = ts_range["first"]
         info["db_last_reading"] = ts_range["last"]
 
-        type_counts = conn.execute("""
-            SELECT
-                SUM(CASE WHEN ieee_address LIKE 'hive-hw:%' THEN 1 ELSE 0 END) as hotwater,
-                SUM(CASE WHEN ieee_address LIKE 'hive:%' AND ieee_address NOT LIKE 'hive-hw:%' THEN 1 ELSE 0 END) as hive,
-                SUM(CASE WHEN ieee_address LIKE 'shelly:%' THEN 1 ELSE 0 END) as shelly,
-                SUM(CASE WHEN ieee_address NOT LIKE 'hive%' AND ieee_address NOT LIKE 'shelly:%' THEN 1 ELSE 0 END) as zigbee
-            FROM readings
-        """).fetchone()
-        info["db_counts"] = dict(type_counts)
+        info["db_counts"] = _get_reading_type_counts(conn)
 
         # Per-sensor last seen and stale flag
         sensor_status = conn.execute("""
@@ -379,6 +395,68 @@ def _calculate_hive_runtime_seconds(conn: sqlite3.Connection, day: str) -> dict:
     return runtimes
 
 
+def _build_probe_chart(conn: sqlite3.Connection, now: datetime | None = None) -> dict:
+    """Build 96 local quarter-hour buckets using the latest actual reading."""
+    current = now or datetime.now()
+    current_bucket = current.replace(
+        minute=(current.minute // 15) * 15,
+        second=0,
+        microsecond=0,
+    )
+    window_start = current_bucket - timedelta(minutes=15 * 95)
+    window_end = current_bucket + timedelta(minutes=15)
+    sensor_keys = (
+        "boiler1_out",
+        "boiler1_return",
+        "boiler2_out",
+        "boiler2_return",
+    )
+    identities = [f"esp32:{key}" for key in sensor_keys]
+    placeholders = ",".join("?" for _ in identities)
+    rows = conn.execute(
+        f"""
+        SELECT id, ieee_address, timestamp, temperature_c
+        FROM readings
+        WHERE ieee_address IN ({placeholders})
+          AND timestamp >= ?
+          AND timestamp < ?
+          AND temperature_c IS NOT NULL
+        ORDER BY timestamp ASC, id ASC
+        """,
+        (*identities, window_start.isoformat(), window_end.isoformat()),
+    ).fetchall()
+
+    values_by_identity = {identity: [None] * 96 for identity in identities}
+    for row in rows:
+        try:
+            timestamp = _parse_iso_timestamp(row["timestamp"])
+        except (TypeError, ValueError):
+            continue
+        bucket_index = int((timestamp - window_start).total_seconds() // 900)
+        if 0 <= bucket_index < 96:
+            values_by_identity[row["ieee_address"]][bucket_index] = row["temperature_c"]
+
+    labels = [
+        (window_start + timedelta(minutes=15 * index)).isoformat()
+        for index in range(96)
+    ]
+    return {
+        "bucket_minutes": 15,
+        "bucket_count": 96,
+        "window_start_local": window_start.isoformat(),
+        "window_end_local": window_end.isoformat(),
+        "labels": labels,
+        "series": [
+            {
+                "ieee_address": identity,
+                "name": ESP32_SENSOR_NAMES[key],
+                "values": values_by_identity[identity],
+            }
+            for key, identity in zip(sensor_keys, identities)
+        ],
+    }
+
+
 def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
     """Build a dashboard snapshot for API and HTML rendering."""
     latest_rows = conn.execute(
@@ -421,7 +499,9 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
     hive_runtime_seconds = _calculate_hive_runtime_seconds(conn, today_local)
 
     sonoff = []
+    esp32 = []
     shelly = []
+    outdoor = []
     hive = []
     hotwater = []
     plugs = []
@@ -493,8 +573,13 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
 
         if _is_plug_row(ieee_address, model, latest.get("friendly_name")):
             plugs.append(sensor_row)
+        elif ieee_address.startswith("esp32:"):
+            esp32.append(sensor_row)
         elif model.startswith("SNZB-02"):
             sonoff.append(sensor_row)
+        elif ieee_address == "shelly:94:B2:16:08:82:98":
+            sensor_row["friendly_name"] = "Outdoor"
+            outdoor.append(sensor_row)
         elif ieee_address.startswith("shelly:") or model == "Shelly Blu H&T":
             shelly.append(sensor_row)
         else:
@@ -502,9 +587,11 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
             sonoff.append(sensor_row)
 
     sonoff.sort(key=lambda row: (_zone_sort_key(row.get("zone")), (row.get("friendly_name") or row.get("ieee_address") or "").lower()))
+    esp32.sort(key=lambda row: (_zone_sort_key(row.get("zone")), (row.get("friendly_name") or row.get("ieee_address") or "").lower()))
     hive.sort(key=lambda row: (_zone_sort_key(row.get("zone")), (row.get("friendly_name") or row.get("ieee_address") or "").lower()))
     hotwater.sort(key=lambda row: (row.get("friendly_name") or row.get("ieee_address")))
     shelly.sort(key=lambda row: (_zone_sort_key(row.get("zone")), (row.get("friendly_name") or row.get("ieee_address") or "").lower()))
+    outdoor.sort(key=lambda row: (row.get("friendly_name") or row.get("ieee_address") or "").lower())
     plugs.sort(key=lambda row: (_zone_sort_key(row.get("zone")), (row.get("friendly_name") or row.get("ieee_address") or "").lower()))
 
     return {
@@ -514,6 +601,9 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
         "date_utc": today_local,
         "generated_at_utc": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "sonoff": sonoff,
+        "esp32": esp32,
+        "probe_chart": _build_probe_chart(conn),
+        "outdoor": outdoor,
         "shelly": shelly,
         "hive": hive,
         "hotwater": hotwater,
@@ -691,9 +781,10 @@ def system_page():
   <div class="card">
     <h3>Breakdown</h3>
     <div class="sub">Zigbee: {{ cnt_zigbee }}</div>
+    <div class="sub">ESP32 heating probes: {{ cnt_esp32 }}</div>
     <div class="sub">Hive heating: {{ cnt_hive }}</div>
     <div class="sub">Hive hot water: {{ cnt_hw }}</div>
-    <div class="sub">Shelly BLE: {{ cnt_shelly }}</div>
+    <div class="sub">Shelly BLE / MQTT: {{ cnt_shelly }}</div>
   </div>
 </div>
 
@@ -745,6 +836,7 @@ def system_page():
         db_first=(info.get("db_first_reading") or "N/A")[:10],
         db_last=(info.get("db_last_reading") or "N/A")[:10],
         cnt_zigbee=fmt(c.get("zigbee")),
+        cnt_esp32=fmt(c.get("esp32")),
         cnt_hive=fmt(c.get("hive")),
         cnt_hw=fmt(c.get("hotwater")),
         cnt_shelly=fmt(c.get("shelly")),
@@ -800,6 +892,9 @@ def dashboard():
     .zone-edit input { width: 90px; padding: 2px 4px; font-size: .9em; }
     .zone-edit button { padding: 2px 6px; font-size: .85em; cursor: pointer; }
     .z2m-badge { font-size: .7em; color: #1a73e8; margin-left: 4px; }
+    .chart-wrap { background: #fff; border: 1px solid #ddd; padding: 10px; margin-bottom: 24px; overflow-x: auto; }
+    #probeChart { width: 100%; min-width: 720px; height: 360px; display: block; }
+    .chart-note { color: #666; font-size: .85em; margin: 0 0 8px; }
   </style>
 </head>
 <body>
@@ -859,6 +954,47 @@ def dashboard():
     </tbody>
   </table>
 
+  <h2>ESP32 / Heating Probes</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Probe</th><th>Zone</th><th>Timestamp</th><th>Temp (&deg;C)</th>
+        <th>Today Low/High Temp (&deg;C)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in esp32 %}
+      <tr>
+        <td>{{ s.friendly_name or s.ieee_address }}</td>
+        <td class="zone-cell" id="zc-{{ s.ieee_address }}">
+          <span class="zone-val" onclick="zoneEdit('{{ s.ieee_address }}','{{ s.zone or '' }}')" title="Click to edit zone">{{ s.zone or "-" }}</span>
+          <span class="zone-edit">
+            <input type="text" placeholder="e.g. Heating">
+            <button onclick="zoneSave('{{ s.ieee_address }}')">&#10003;</button>
+            <button onclick="zoneCancel('{{ s.ieee_address }}')">&#10007;</button>
+          </span>
+        </td>
+        <td>{{ s.timestamp }}</td>
+        <td>{% if s.temperature_c is not none %}{{ "%.1f"|format(s.temperature_c) }}{% else %}-{% endif %}</td>
+        <td>
+          {% if s.min_temp_c is not none and s.max_temp_c is not none %}
+            {{ "%.1f"|format(s.min_temp_c) }} / {{ "%.1f"|format(s.max_temp_c) }}
+          {% else %}-{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      {% if not esp32 %}
+      <tr><td colspan="5" style="color:#999">No ESP32 heating probe data yet</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+
+  <h2>Boiler Probe Temperatures - Preceding 24 Hours</h2>
+  <div class="chart-wrap">
+    <p class="chart-note">Latest actual reading in each local 15-minute bucket. Gaps mean no reading; values are not averaged or carried forward.</p>
+    <svg id="probeChart" viewBox="0 0 1000 360" role="img" aria-label="Four boiler probe temperatures over the preceding 24 hours"></svg>
+  </div>
+
   <h2>Hive Thermostats</h2>
   <table>
     <thead>
@@ -914,7 +1050,53 @@ def dashboard():
     </tbody>
   </table>
 
-  <h2>Shelly Blu H&amp;T</h2>
+  <h2>Outdoor</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Sensor</th><th>Zone</th><th>Timestamp</th><th>Temp (&deg;C)</th><th>Humidity (%)</th>
+        <th>Battery (%)</th><th>Voltage (V)</th><th>RSSI</th>
+        <th>Today Low/High Temp (&deg;C)</th><th>Today Low/High Humidity (%)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in outdoor %}
+      <tr>
+        <td>{{ s.friendly_name or s.ieee_address }}</td>
+        <td class="zone-cell" id="zc-{{ s.ieee_address }}">
+          <span class="zone-val" onclick="zoneEdit('{{ s.ieee_address }}','{{ s.zone or '' }}')" title="Click to edit zone">{{ s.zone or "-" }}</span>
+          <span class="zone-edit">
+            <input type="text" placeholder="e.g. Zone 4">
+            <button onclick="zoneSave('{{ s.ieee_address }}')">&#10003;</button>
+            <button onclick="zoneCancel('{{ s.ieee_address }}')">&#10007;</button>
+          </span>
+        </td>
+        <td>{{ s.timestamp }}</td>
+        <td>{% if s.temperature_c is not none %}{{ "%.1f"|format(s.temperature_c) }}{% else %}-{% endif %}</td>
+        <td>{% if s.humidity_pct is not none %}{{ "%.1f"|format(s.humidity_pct) }}{% else %}-{% endif %}</td>
+        <td>{% if s.battery_pct is not none %}{{ "%.0f"|format(s.battery_pct) }}{% else %}-{% endif %}</td>
+        <td>{% if s.battery_voltage_mv is not none %}{{ "%.2f"|format(s.battery_voltage_mv / 1000) }}{% else %}-{% endif %}</td>
+        <td>{% if s.rssi is not none %}{{ s.rssi }}{% else %}-{% endif %}</td>
+        <td>
+          {% if s.min_temp_c is not none and s.max_temp_c is not none %}
+            {{ "%.1f"|format(s.min_temp_c) }} / {{ "%.1f"|format(s.max_temp_c) }}
+          {% else %}-{% endif %}
+        </td>
+        <td>
+          {% if s.min_humidity_pct is not none and s.max_humidity_pct is not none %}
+            {{ "%.1f"|format(s.min_humidity_pct) }} / {{ "%.1f"|format(s.max_humidity_pct) }}
+          {% else %}-{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      {% if not outdoor %}
+      <tr><td colspan="10" style="color:#999">No Outdoor data yet</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+
+  {% if shelly %}
+  <h2>Other Shelly Blu H&amp;T Sensors</h2>
   <table>
     <thead>
       <tr>
@@ -955,6 +1137,7 @@ def dashboard():
       {% endfor %}
     </tbody>
   </table>
+  {% endif %}
 
   <h2>Hive Plugs</h2>
   <table>
@@ -988,6 +1171,56 @@ def dashboard():
     </tbody>
   </table>
 <script>
+const probeChart = {{ probe_chart|tojson }};
+(function renderProbeChart() {
+  const svg = document.getElementById('probeChart');
+  const ns = 'http://www.w3.org/2000/svg';
+  const colors = ['#d62728', '#ff7f0e', '#1f77b4', '#2ca02c'];
+  const allValues = probeChart.series.flatMap(s => s.values.filter(v => v !== null));
+  const minValue = allValues.length ? Math.floor(Math.min(...allValues) - 1) : 0;
+  const maxValue = allValues.length ? Math.ceil(Math.max(...allValues) + 1) : 40;
+  const range = Math.max(maxValue - minValue, 1);
+  const plot = {left: 58, top: 28, width: 910, height: 270};
+  function add(name, attrs, text) {
+    const element = document.createElementNS(ns, name);
+    Object.entries(attrs || {}).forEach(([key, value]) => element.setAttribute(key, value));
+    if (text !== undefined) element.textContent = text;
+    svg.appendChild(element);
+    return element;
+  }
+  add('rect', {x: plot.left, y: plot.top, width: plot.width, height: plot.height, fill: '#fff', stroke: '#ccc'});
+  for (let step = 0; step <= 4; step++) {
+    const value = minValue + range * step / 4;
+    const y = plot.top + plot.height - plot.height * step / 4;
+    add('line', {x1: plot.left, y1: y, x2: plot.left + plot.width, y2: y, stroke: '#eee'});
+    add('text', {x: plot.left - 8, y: y + 4, 'text-anchor': 'end', fill: '#555', 'font-size': '12'}, value.toFixed(1));
+  }
+  [0, 24, 48, 72, 95].forEach(index => {
+    const x = plot.left + plot.width * index / 95;
+    const label = new Date(probeChart.labels[index]).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+    add('text', {x, y: plot.top + plot.height + 20, 'text-anchor': 'middle', fill: '#555', 'font-size': '12'}, label);
+  });
+  probeChart.series.forEach((series, seriesIndex) => {
+    let path = '';
+    let drawing = false;
+    series.values.forEach((value, index) => {
+      if (value === null) {
+        drawing = false;
+        return;
+      }
+      const x = plot.left + plot.width * index / 95;
+      const y = plot.top + plot.height - ((value - minValue) / range) * plot.height;
+      path += `${drawing ? ' L' : ' M'} ${x.toFixed(2)} ${y.toFixed(2)}`;
+      add('circle', {cx: x, cy: y, r: '2', fill: colors[seriesIndex]});
+      drawing = true;
+    });
+    add('path', {d: path, fill: 'none', stroke: colors[seriesIndex], 'stroke-width': '2'});
+    const legendX = plot.left + seriesIndex * 225;
+    add('line', {x1: legendX, y1: 330, x2: legendX + 24, y2: 330, stroke: colors[seriesIndex], 'stroke-width': '3'});
+    add('text', {x: legendX + 30, y: 334, fill: '#333', 'font-size': '12'}, series.name);
+  });
+})();
+
 function zoneEdit(ieee, currentZone) {
   var cell = document.getElementById('zc-' + ieee);
   var val = cell.querySelector('.zone-val');

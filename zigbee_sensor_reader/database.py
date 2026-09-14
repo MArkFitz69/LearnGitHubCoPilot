@@ -70,6 +70,13 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_readings_zone
             ON readings (zone);
 
+        CREATE TABLE IF NOT EXISTS mqtt_packet_state (
+            ieee_address TEXT PRIMARY KEY,
+            packet_id    INTEGER NOT NULL,
+            updated_at   TEXT NOT NULL,
+            FOREIGN KEY (ieee_address) REFERENCES sensors(ieee_address)
+        );
+
         CREATE TABLE IF NOT EXISTS onboarding_state (
             id                INTEGER PRIMARY KEY CHECK (id = 1),
             pairing_active    INTEGER NOT NULL DEFAULT 0,
@@ -154,6 +161,7 @@ def _create_tables(conn: sqlite3.Connection) -> None:
     )
     conn.commit()
     _migrate_normalise_ieee(conn)
+    _migrate_outdoor_shelly(conn)
 
 
 def _normalise_ieee(raw: str) -> str:
@@ -206,6 +214,81 @@ def _migrate_normalise_ieee(conn: sqlite3.Connection) -> None:
                 "UPDATE readings SET ieee_address = ? WHERE ieee_address = ?",
                 (canon, raw_ieee),
             )
+    conn.commit()
+
+
+def _migrate_outdoor_shelly(conn: sqlite3.Connection) -> None:
+    """Consolidate the transitional ESP identity into the physical BLE MAC."""
+    canonical = "shelly:94:B2:16:08:82:98"
+    legacy = "shelly:esp32:outdoor_ht"
+    canonical_row = conn.execute(
+        "SELECT ieee_address FROM sensors WHERE ieee_address = ?",
+        (canonical,),
+    ).fetchone()
+    legacy_row = conn.execute(
+        "SELECT ieee_address FROM sensors WHERE ieee_address = ?",
+        (legacy,),
+    ).fetchone()
+
+    if legacy_row:
+        if canonical_row:
+            conn.execute(
+                "UPDATE readings SET ieee_address = ? WHERE ieee_address = ?",
+                (canonical, legacy),
+            )
+            packet_rows = conn.execute(
+                """
+                SELECT packet_id, updated_at FROM mqtt_packet_state
+                WHERE ieee_address IN (?, ?)
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (canonical, legacy),
+            ).fetchone()
+            conn.execute("DELETE FROM mqtt_packet_state WHERE ieee_address = ?", (legacy,))
+            if packet_rows:
+                conn.execute(
+                    """
+                    INSERT INTO mqtt_packet_state (ieee_address, packet_id, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(ieee_address) DO UPDATE SET
+                        packet_id = excluded.packet_id,
+                        updated_at = excluded.updated_at
+                    """,
+                    (canonical, packet_rows["packet_id"], packet_rows["updated_at"]),
+                )
+            conn.execute("DELETE FROM sensors WHERE ieee_address = ?", (legacy,))
+        else:
+            conn.execute(
+                "UPDATE sensors SET ieee_address = ? WHERE ieee_address = ?",
+                (canonical, legacy),
+            )
+            conn.execute(
+                "UPDATE readings SET ieee_address = ? WHERE ieee_address = ?",
+                (canonical, legacy),
+            )
+            conn.execute(
+                "UPDATE mqtt_packet_state SET ieee_address = ? WHERE ieee_address = ?",
+                (canonical, legacy),
+            )
+
+    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    conn.execute(
+        """
+        INSERT INTO sensors (
+            ieee_address, friendly_name, model, zone, name_source, first_seen, last_seen
+        )
+        VALUES (?, 'Outdoor', 'Shelly Blu H&T', 'Zone 4', 'config', ?, ?)
+        ON CONFLICT(ieee_address) DO UPDATE SET
+            friendly_name = 'Outdoor',
+            zone = 'Zone 4',
+            zone_override = CASE
+                WHEN sensors.zone_override IN ('Zone 5', 'Attic') THEN NULL
+                ELSE sensors.zone_override
+            END,
+            name_source = 'config'
+        """,
+        (canonical, now, now),
+    )
     conn.commit()
 
 
@@ -306,9 +389,18 @@ def insert_reading(
     device_max_humidity_pct: float | None = None,
     battery_voltage_mv: float | None = None,
     rssi: int | None = None,
-) -> None:
-    """Store a single sensor reading."""
+    packet_id: int | None = None,
+) -> bool:
+    """Store a sensor reading, returning False for a duplicate MQTT packet."""
     now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    if packet_id is not None:
+        previous = conn.execute(
+            "SELECT packet_id FROM mqtt_packet_state WHERE ieee_address = ?",
+            (ieee_address,),
+        ).fetchone()
+        if previous and previous["packet_id"] == packet_id:
+            return False
+
     reading_date = now[:10]
     reading_time = now[11:19]
     heating_int = int(heating_on) if heating_on is not None else None
@@ -333,4 +425,16 @@ def insert_reading(
         "UPDATE sensors SET last_seen = ? WHERE ieee_address = ?",
         (now, ieee_address),
     )
+    if packet_id is not None:
+        conn.execute(
+            """
+            INSERT INTO mqtt_packet_state (ieee_address, packet_id, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(ieee_address) DO UPDATE SET
+                packet_id = excluded.packet_id,
+                updated_at = excluded.updated_at
+            """,
+            (ieee_address, packet_id, now),
+        )
     conn.commit()
+    return True
