@@ -18,7 +18,7 @@ import logging
 import struct
 from datetime import datetime, timedelta
 
-from .config import SHELLY_SENSORS, ZONES
+from .config import SHELLY_AUTHORITATIVE_SOURCES, SHELLY_SENSORS, ZONES
 from .database import get_connection, upsert_sensor, insert_reading
 
 logger = logging.getLogger(__name__)
@@ -247,6 +247,8 @@ async def poll_shelly_ble(scan_duration: float = 60.0) -> list[dict]:
             battery_voltage_mv=data.get("voltage") * 1000 if data.get("voltage") is not None else None,
             rssi=data.get("rssi"),
             packet_id=int(data["packet_id"]) if data.get("packet_id") is not None else None,
+            source="ble",
+            authoritative_source=SHELLY_AUTHORITATIVE_SOURCES.get(mac),
         )
         if not was_stored:
             logger.debug(

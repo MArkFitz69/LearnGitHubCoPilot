@@ -9,10 +9,20 @@ WorkingDirectory=/home/admin/LearnGitHubCoPilot
 ExecStart=/home/admin/LearnGitHubCoPilot/.venv/bin/python -m zigbee_sensor_reader
 Restart=always
 RestartSec=10
-Environment=ZIGBEE_HOST=192.168.1.59
-Environment=ZIGBEE_PORT=6638
 Environment=HIVE_USERNAME=your-hive-email@example.com
 Environment=HIVE_PASSWORD=your-hive-password
+Environment=Z2M_MQTT_HOST=home-logger
+Environment=Z2M_MQTT_PORT=8081
+Environment=Z2M_MQTT_TRANSPORT=websockets
+# Recommended broker authentication:
+# Environment=Z2M_MQTT_USER=sensor-reader
+# Environment=Z2M_MQTT_PASS=replace-with-a-service-secret
+# Verified TLS/WSS (never disable certificate verification):
+# Environment=Z2M_MQTT_TLS=true
+# Environment=Z2M_MQTT_CA_CERT=/etc/ssl/certs/home-mqtt-ca.pem
+# Optional mutual TLS:
+# Environment=Z2M_MQTT_CLIENT_CERT=/etc/zigbee-sensor-reader/client.pem
+# Environment=Z2M_MQTT_CLIENT_KEY=/etc/zigbee-sensor-reader/client.key
 # ESP32 feed uses the Z2M broker values by default.
 Environment=ESP32_TOPIC_PREFIX=heating-esp
 Environment="ESP32_ZONE_SHELLY=Zone 4"
@@ -20,8 +30,7 @@ Environment="ESP32_ZONE_SHELLY=Zone 4"
 # Environment=ESP32_MQTT_HOST=home-logger
 # Environment=ESP32_MQTT_PORT=8081
 # Environment=ESP32_MQTT_TRANSPORT=websockets
-# Environment=ESP32_MQTT_USER=
-# Environment=ESP32_MQTT_PASS=
+# ESP32_MQTT_TLS/CA_CERT/CLIENT_CERT/CLIENT_KEY overrides are also supported.
 # Shelly BLE scan window (seconds) — sensor advertises every 3-10 mins
 Environment=SHELLY_SCAN_DURATION=120
 

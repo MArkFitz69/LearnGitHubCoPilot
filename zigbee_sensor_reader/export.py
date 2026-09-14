@@ -53,7 +53,8 @@ def export_to_csv(
             r.temperature_c,
             r.humidity_pct,
             r.battery_pct,
-            r.link_quality
+            r.link_quality,
+            COALESCE(s.zone_override, s.zone, r.zone) AS zone
         FROM readings r
         LEFT JOIN sensors s ON r.ieee_address = s.ieee_address
         WHERE 1=1
@@ -79,7 +80,7 @@ def export_to_csv(
         writer = csv.writer(f)
         writer.writerow([
             "Timestamp", "Reading Date", "Reading Time", "IEEE Address", "Sensor Name", "Model",
-            "Temperature (°C)", "Humidity (%)", "Battery (%)", "Link Quality",
+            "Temperature (°C)", "Humidity (%)", "Battery (%)", "Link Quality", "Zone",
         ])
         for row in rows:
             writer.writerow([
@@ -93,6 +94,7 @@ def export_to_csv(
                 row["humidity_pct"],
                 row["battery_pct"],
                 row["link_quality"],
+                row["zone"],
             ])
 
     print(f"Exported {len(rows)} readings to {output_path}")
@@ -138,7 +140,7 @@ def export_to_excel(
     ws_all.title = "All Sensors"
     headers = [
         "Timestamp", "Reading Date", "Reading Time", "Sensor Name", "Temperature (°C)",
-        "Humidity (%)", "Battery (%)", "Link Quality",
+        "Humidity (%)", "Battery (%)", "Link Quality", "Zone",
     ]
     ws_all.append(headers)
 
@@ -151,7 +153,8 @@ def export_to_excel(
             r.temperature_c,
             r.humidity_pct,
             r.battery_pct,
-            r.link_quality
+            r.link_quality,
+            COALESCE(s.zone_override, s.zone, r.zone) AS zone
         FROM readings r
         LEFT JOIN sensors s ON r.ieee_address = s.ieee_address
         WHERE 1=1
@@ -173,6 +176,7 @@ def export_to_excel(
         ws_all.append([
             row["timestamp"], row["reading_date"], row["reading_time"], row["sensor_name"], row["temperature_c"],
             row["humidity_pct"], row["battery_pct"], row["link_quality"],
+            row["zone"],
         ])
 
     # Create per-sensor sheets
@@ -181,26 +185,34 @@ def export_to_excel(
         name = sensor["friendly_name"] or ieee
         sheet_name = name[:31]  # Sheet names max 31 chars
         ws = wb.create_sheet(title=sheet_name)
-        ws.append(["Timestamp", "Reading Date", "Reading Time", "Temperature (°C)", "Humidity (%)", "Battery (%)", "Link Quality"])
+        ws.append([
+            "Timestamp", "Reading Date", "Reading Time", "Temperature (°C)",
+            "Humidity (%)", "Battery (%)", "Link Quality", "Zone",
+        ])
 
         sensor_query = """
-            SELECT timestamp, reading_date, reading_time, temperature_c, humidity_pct, battery_pct, link_quality
-            FROM readings
-            WHERE ieee_address = ?
+            SELECT r.timestamp, r.reading_date, r.reading_time,
+                   r.temperature_c, r.humidity_pct, r.battery_pct,
+                   r.link_quality,
+                   COALESCE(s.zone_override, s.zone, r.zone) AS zone
+            FROM readings r
+            LEFT JOIN sensors s ON r.ieee_address = s.ieee_address
+            WHERE r.ieee_address = ?
         """
         sensor_params = [ieee]
         if start_date:
-            sensor_query += " AND timestamp >= ?"
+            sensor_query += " AND r.timestamp >= ?"
             sensor_params.append(start_date)
         if end_date:
-            sensor_query += " AND timestamp <= ?"
+            sensor_query += " AND r.timestamp <= ?"
             sensor_params.append(end_date)
-        sensor_query += " ORDER BY timestamp ASC"
+        sensor_query += " ORDER BY r.timestamp ASC"
 
         for row in conn.execute(sensor_query, sensor_params):
             ws.append([
                 row["timestamp"], row["reading_date"], row["reading_time"], row["temperature_c"],
                 row["humidity_pct"], row["battery_pct"], row["link_quality"],
+                row["zone"],
             ])
 
     conn.close()

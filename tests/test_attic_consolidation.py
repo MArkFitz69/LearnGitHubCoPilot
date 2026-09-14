@@ -19,7 +19,6 @@ from zigbee_sensor_reader.database import (
 )
 from zigbee_sensor_reader.web_server import _build_dashboard_snapshot, app
 from zigbee_sensor_reader.z2m_reader import Z2MReader
-from zigbee_sensor_reader.z2m_sync import sync_z2m_devices
 
 
 ATTIC = "shelly:FC:4D:6A:1D:1D:FB"
@@ -74,11 +73,17 @@ class AtticMigrationTests(unittest.TestCase):
                 (identity, timestamp, timestamp, timestamp, temperature),
             )
         self.conn.execute(
-            "INSERT INTO mqtt_packet_state VALUES (?, 10, '2026-01-03T00:00:00')",
+            """
+            INSERT INTO mqtt_packet_state (ieee_address, packet_id, updated_at)
+            VALUES (?, 10, '2026-01-03T00:00:00')
+            """,
             (ATTIC,),
         )
         self.conn.execute(
-            "INSERT INTO mqtt_packet_state VALUES (?, 11, '2026-01-06T00:00:00')",
+            """
+            INSERT INTO mqtt_packet_state (ieee_address, packet_id, updated_at)
+            VALUES (?, 11, '2026-01-06T00:00:00')
+            """,
             (ATTIC_ALIAS,),
         )
         self.conn.commit()
@@ -198,8 +203,11 @@ class AtticZ2MTests(unittest.TestCase):
         self.assertEqual(reading["zone"], "Zone 5")
         self.assertEqual(reading["temperature_c"], 18.5)
 
-    def test_legacy_z2m_sync_uses_same_canonical_mapping(self):
-        self.assertEqual(sync_z2m_devices(self._device_payload(), self.conn), 1)
+    def test_bridge_sync_uses_same_canonical_mapping(self):
+        Z2MReader(get_conn_fn=lambda: self.conn).handle_message(
+            "zigbee2mqtt/bridge/devices",
+            self._device_payload(),
+        )
         row = self.conn.execute(
             "SELECT ieee_address, friendly_name, zone, zone_override FROM sensors WHERE friendly_name = 'Attic'"
         ).fetchone()
@@ -233,6 +241,21 @@ class AtticZ2MTests(unittest.TestCase):
         self.assertEqual(row["ieee_address"], "00:12:4b:00:25:e7:a1:c3")
         self.assertEqual(row["zone_override"], "Zone 2")
         self.assertEqual(row["name_source"], "z2m")
+
+        payload = json.dumps([{
+            "ieee_address": "0x00124b0025e7a1c3",
+            "friendly_name": "Utility Sensor",
+            "description": "",
+            "definition": {"model": "SNZB-02D"},
+        }])
+        reader.handle_message("zigbee2mqtt/bridge/devices", payload)
+        cleared = self.conn.execute(
+            """
+            SELECT zone_override FROM sensors
+            WHERE friendly_name='Utility Sensor'
+            """
+        ).fetchone()
+        self.assertIsNone(cleared["zone_override"])
 
 
 class AtticSurfaceTests(unittest.TestCase):

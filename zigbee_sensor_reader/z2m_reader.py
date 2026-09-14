@@ -5,10 +5,9 @@ Subscribes to the MQTT broker and handles two topic families:
   - zigbee2mqtt/bridge/devices  → sync friendly names + zones (from description)
   - zigbee2mqtt/<friendly_name> → temperature, humidity, battery readings
 
-This replaces the bellows/zigpy direct-dongle approach.  Zigbee2MQTT already
-owns the coordinator; this module just reads what it publishes.
+Zigbee2MQTT owns the coordinator; this module reads what it publishes.
 
-Environment variables (all optional, same defaults as z2m_sync.py):
+Environment variables (all optional):
     Z2M_MQTT_HOST      default: home-logger
     Z2M_MQTT_PORT      default: 8081
     Z2M_MQTT_USER      default: (empty)
@@ -20,23 +19,23 @@ Environment variables (all optional, same defaults as z2m_sync.py):
 import asyncio
 import json
 import logging
-import os
 import sqlite3
 from typing import Callable
 
 from .config import SHELLY_IDENTITY_ALIASES, SHELLY_SENSORS, ZONES
+from .mqtt_config import MQTTSettings
 
 logger = logging.getLogger(__name__)
 
-Z2M_MQTT_HOST = os.environ.get("Z2M_MQTT_HOST", "home-logger")
-Z2M_MQTT_PORT = int(os.environ.get("Z2M_MQTT_PORT", "8081"))
-Z2M_MQTT_USER = os.environ.get("Z2M_MQTT_USER", "")
-Z2M_MQTT_PASS = os.environ.get("Z2M_MQTT_PASS", "")
+import os
+
+Z2M_MQTT_SETTINGS = MQTTSettings.from_env("Z2M")
+Z2M_MQTT_HOST = Z2M_MQTT_SETTINGS.host
+Z2M_MQTT_PORT = Z2M_MQTT_SETTINGS.port
+Z2M_MQTT_USER = Z2M_MQTT_SETTINGS.username
+Z2M_MQTT_PASS = Z2M_MQTT_SETTINGS.password
+Z2M_MQTT_TRANSPORT = Z2M_MQTT_SETTINGS.transport
 Z2M_TOPIC_PREFIX = os.environ.get("Z2M_TOPIC_PREFIX", "zigbee2mqtt")
-Z2M_MQTT_TRANSPORT = os.environ.get(
-    "Z2M_MQTT_TRANSPORT",
-    "tcp" if Z2M_MQTT_PORT == 1883 else "websockets",
-)
 
 
 def _normalise_ieee(ieee_raw: str) -> str:
@@ -101,6 +100,7 @@ class Z2MSensorReading:
         self.device_max_temp_c = None
         self.device_min_humidity_pct = None
         self.device_max_humidity_pct = None
+        self.source = "z2m"
 
 
 def _normalise_zone(value: str | None) -> str | None:
@@ -114,7 +114,6 @@ def _extract_energy_kwh(data: dict) -> float | None:
     candidates = [
         data.get("energy"),
         data.get("energy_kwh"),
-        data.get("consumption"),
         data.get("consumption_kwh"),
     ]
     for candidate in candidates:
@@ -124,8 +123,6 @@ def _extract_energy_kwh(data: dict) -> float | None:
             value = float(candidate)
         except (TypeError, ValueError):
             continue
-        if value > 1000:
-            return value / 1000.0
         return value
 
     nested = data.get("metering")
@@ -138,8 +135,6 @@ def _extract_energy_kwh(data: dict) -> float | None:
                 value = float(candidate)
             except (TypeError, ValueError):
                 continue
-            if value > 1000:
-                return value / 1000.0
             return value
     return None
 
@@ -159,9 +154,11 @@ class Z2MReader:
         self,
         on_reading: ReadingCallback | None = None,
         get_conn_fn: Callable[[], sqlite3.Connection] | None = None,
+        close_connections: bool = False,
     ):
         self._on_reading = on_reading
         self._get_conn = get_conn_fn
+        self._close_connections = close_connections
         self._ieee_by_name: dict[str, str] = {}  # friendly_name → ieee
         self._model_by_ieee: dict[str, str] = {}
 
@@ -236,21 +233,23 @@ class Z2MReader:
                 try:
                     from .database import upsert_sensor
                     conn = self._get_conn()
-                    upsert_sensor(
-                        conn,
-                        ieee_address=ieee,
-                        friendly_name=configured_name or name,
-                        model=model or None,
-                        zone=configured_zone or _normalise_zone(zone_from_desc),
-                        name_source="config" if configured_name else "z2m",
-                    )
-                    if configured_name:
-                        from .database import set_sensor_zone_override
-                        set_sensor_zone_override(conn, ieee, None)
-                    elif zone_from_desc:
-                        from .database import set_sensor_zone_override
-                        set_sensor_zone_override(conn, ieee, _normalise_zone(zone_from_desc))
-                    updated += 1
+                    try:
+                        upsert_sensor(
+                            conn,
+                            ieee_address=ieee,
+                            friendly_name=configured_name or name,
+                            model=model or None,
+                            zone=configured_zone or ZONES.get(ieee),
+                            zone_override=(
+                                None if configured_name
+                                else _normalise_zone(zone_from_desc)
+                            ),
+                            name_source="config" if configured_name else "z2m",
+                        )
+                        updated += 1
+                    finally:
+                        if self._close_connections:
+                            conn.close()
                 except Exception as exc:
                     logger.warning("z2m DB sync failed for %s: %s", ieee, exc)
 
@@ -358,7 +357,11 @@ async def run_z2m_reader(
         )
         return
 
-    reader = Z2MReader(on_reading=on_reading, get_conn_fn=get_conn_fn)
+    reader = Z2MReader(
+        on_reading=on_reading,
+        get_conn_fn=get_conn_fn,
+        close_connections=True,
+    )
     devices_topic = f"{Z2M_TOPIC_PREFIX}/bridge/devices"
     sensor_topic = f"{Z2M_TOPIC_PREFIX}/#"
 
@@ -393,8 +396,7 @@ async def run_z2m_reader(
         client.on_message = on_message
         client.on_disconnect = on_disconnect
 
-        if Z2M_MQTT_USER:
-            client.username_pw_set(Z2M_MQTT_USER, Z2M_MQTT_PASS)
+        Z2M_MQTT_SETTINGS.configure_client(client)
 
         try:
             client.connect_async(Z2M_MQTT_HOST, Z2M_MQTT_PORT, keepalive=60)

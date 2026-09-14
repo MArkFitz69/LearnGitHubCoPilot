@@ -26,11 +26,8 @@ Query parameters for /api/readings:
 
 import csv
 import io
-import hmac
 import logging
 import math
-import os
-import socket
 import sqlite3
 import subprocess
 from datetime import datetime, timedelta
@@ -38,23 +35,7 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template_string, request
 
-from .config import (
-    DATABASE_PATH,
-    ESP32_SENSOR_NAMES,
-    SHELLY_SENSORS,
-    ZIGBEE_HOST,
-    ZIGBEE_PORT,
-)
-from .database import get_connection
-from .onboarding import (
-    create_temp_passcode,
-    get_onboarding_state,
-    is_valid_temp_passcode,
-    now_iso,
-    queue_start_pairing,
-    save_sensor_metadata,
-    set_tcp_check_state,
-)
+from .config import DATABASE_PATH, ESP32_SENSOR_NAMES, POLLING_INTERVAL, SHELLY_SENSORS
 
 logger = logging.getLogger(__name__)
 
@@ -69,38 +50,6 @@ def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(f"file:{DATABASE_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
-
-
-def get_db_write() -> sqlite3.Connection:
-    """Get a read-write connection and ensure latest schema exists."""
-    return get_connection()
-
-
-def _check_dongle_tcp() -> tuple[bool, str]:
-    try:
-        with socket.create_connection((ZIGBEE_HOST, ZIGBEE_PORT), timeout=3):
-            return True, "connected"
-    except OSError as exc:
-        return False, str(exc)
-
-
-def _is_admin_passcode(passcode: str) -> bool:
-    configured = os.environ.get("ONBOARDING_PASSCODE")
-    if not configured:
-        return False
-    return hmac.compare_digest(passcode, configured)
-
-
-def _is_valid_onboarding_passcode(conn: sqlite3.Connection, passcode: str) -> bool:
-    return _is_admin_passcode(passcode) or is_valid_temp_passcode(conn, passcode)
-
-
-def _onboarding_auth_result(conn: sqlite3.Connection, passcode: str) -> dict:
-    if not passcode:
-        return {"ok": False, "error": "Passcode is required."}
-    if _is_valid_onboarding_passcode(conn, passcode):
-        return {"ok": True, "is_admin": _is_admin_passcode(passcode)}
-    return {"ok": False, "error": "Invalid or expired passcode."}
 
 
 def _parse_iso_timestamp(value: str) -> datetime:
@@ -294,14 +243,22 @@ def _get_system_info() -> dict:
         # Per-sensor last seen and stale flag
         sensor_status = conn.execute("""
             SELECT s.ieee_address, s.friendly_name, s.model,
-                   COALESCE(s.zone_override, s.zone) AS zone, r.last_ts,
+                   COALESCE(s.zone_override, s.zone, r.zone) AS zone, r.last_ts,
                    CAST((julianday('now','localtime') - julianday(r.last_ts)) * 1440 AS INTEGER) AS mins_ago
             FROM sensors s
             LEFT JOIN (
-                SELECT ieee_address, MAX(timestamp) as last_ts
-                FROM readings GROUP BY ieee_address
+                SELECT ieee_address, timestamp AS last_ts, zone
+                FROM (
+                    SELECT ieee_address, timestamp, zone,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY ieee_address
+                               ORDER BY timestamp DESC, id DESC
+                           ) AS row_number
+                    FROM readings
+                )
+                WHERE row_number=1
             ) r ON s.ieee_address = r.ieee_address
-            ORDER BY COALESCE(s.zone_override, s.zone), s.friendly_name
+            ORDER BY COALESCE(s.zone_override, s.zone, r.zone), s.friendly_name
         """).fetchall()
         info["sensor_status"] = [dict(row) for row in sensor_status]
 
@@ -386,7 +343,10 @@ def _calculate_hive_runtime_seconds(conn: sqlite3.Connection, day: str) -> dict:
             if index + 1 < len(samples):
                 next_ts = _parse_iso_timestamp(samples[index + 1]["timestamp"])
             else:
-                next_ts = now
+                freshness_limit = current_ts + timedelta(
+                    seconds=POLLING_INTERVAL + max(30, POLLING_INTERVAL // 2)
+                )
+                next_ts = min(now, freshness_limit)
 
             if next_ts > current_ts:
                 total_seconds += (next_ts - current_ts).total_seconds()
@@ -639,27 +599,6 @@ def api_status():
     })
 
 
-@app.route("/api/sensors/<path:ieee_address>/zone", methods=["PATCH"])
-def api_set_zone(ieee_address: str):
-    """Set or clear a zone override for a sensor.
-
-    Body (JSON): {"zone": "Zone 1"}  — set a zone
-                 {"zone": null}       — clear the override (revert to config.py)
-    """
-    from .database import set_sensor_zone_override
-    data = request.get_json(silent=True) or {}
-    zone_value = data.get("zone")  # None means clear
-    conn = get_db_write()
-    try:
-        set_sensor_zone_override(conn, ieee_address, zone_value or None)
-        return jsonify({"ok": True, "ieee_address": ieee_address, "zone_override": zone_value})
-    except Exception as exc:
-        logger.warning("Zone update failed for %s: %s", ieee_address, exc)
-        return jsonify({"ok": False, "error": str(exc)}), 500
-    finally:
-        conn.close()
-
-
 @app.route("/api/system")
 def api_system():
     """Full system and application status as JSON."""
@@ -715,7 +654,7 @@ def system_page():
 </head>
 <body>
 <h1>&#128202; System Status</h1>
-<div class="meta">{{ gen }} &mdash; Auto-refresh 30s &nbsp;|&nbsp; <a href="/dashboard">&#127968; Dashboard</a> &nbsp;|&nbsp; <a href="/onboarding">&#128268; Onboarding</a></div>
+<div class="meta">{{ gen }} &mdash; Auto-refresh 30s &nbsp;|&nbsp; <a href="/dashboard">&#127968; Dashboard</a></div>
 
 <div class="linkbar">
   <div class="pill"><a href="{{ download_url }}">&#128229; Download CSV</a></div>
@@ -892,12 +831,6 @@ def dashboard():
     .status-on { color: #0b7a0b; font-weight: bold; }
     .status-off { color: #a33; font-weight: bold; }
     .status-boost { color: #8a2be2; font-weight: bold; }
-    .zone-cell { white-space: nowrap; }
-    .zone-val { cursor: pointer; border-bottom: 1px dashed #aaa; }
-    .zone-val:hover { background: #fffbe6; }
-    .zone-edit { display: none; }
-    .zone-edit input { width: 90px; padding: 2px 4px; font-size: .9em; }
-    .zone-edit button { padding: 2px 6px; font-size: .85em; cursor: pointer; }
     .z2m-badge { font-size: .7em; color: #1a73e8; margin-left: 4px; }
     .chart-wrap { background: #fff; border: 1px solid #ddd; padding: 10px; margin-bottom: 24px; overflow-x: auto; }
     #probeChart { width: 100%; min-width: 720px; height: 360px; display: block; }
@@ -907,7 +840,7 @@ def dashboard():
 <body>
   <div class="titlebar">
     <h1>&#127968; Home Sensor Dashboard</h1>
-    <div class="meta">Generated (Local): {{ generated_at_local or generated_at_utc }} | Auto-refresh: 60s | <a href="/system">&#128202; System Status</a> | <a href="/onboarding">&#128268; Sensor Onboarding</a></div>
+    <div class="meta">Generated (Local): {{ generated_at_local or generated_at_utc }} | Auto-refresh: 60s | <a href="/system">&#128202; System Status</a></div>
   </div>
 
   <div class="linkbar">
@@ -929,14 +862,7 @@ def dashboard():
       {% for s in sonoff %}
       <tr>
         <td>{{ s.friendly_name or s.ieee_address }}{% if s.name_source == 'z2m' %}<span class="z2m-badge" title="Name from Zigbee2MQTT">z2m</span>{% endif %}</td>
-        <td class="zone-cell" id="zc-{{ s.ieee_address }}">
-          <span class="zone-val" onclick="zoneEdit('{{ s.ieee_address }}','{{ s.zone or '' }}')" title="Click to edit zone">{{ s.zone or "-" }}</span>
-          <span class="zone-edit">
-            <input type="text" placeholder="e.g. Zone 1">
-            <button onclick="zoneSave('{{ s.ieee_address }}')">&#10003;</button>
-            <button onclick="zoneCancel('{{ s.ieee_address }}')">&#10007;</button>
-          </span>
-        </td>
+        <td>{{ s.zone or "-" }}</td>
         <td>{{ s.timestamp }}</td>
         <td>{% if s.temperature_c is not none %}{{ "%.1f"|format(s.temperature_c) }}{% else %}-{% endif %}</td>
         <td>{% if s.humidity_pct is not none %}{{ "%.1f"|format(s.humidity_pct) }}{% else %}-{% endif %}</td>
@@ -973,14 +899,7 @@ def dashboard():
       {% for s in esp32 %}
       <tr>
         <td>{{ s.friendly_name or s.ieee_address }}</td>
-        <td class="zone-cell" id="zc-{{ s.ieee_address }}">
-          <span class="zone-val" onclick="zoneEdit('{{ s.ieee_address }}','{{ s.zone or '' }}')" title="Click to edit zone">{{ s.zone or "-" }}</span>
-          <span class="zone-edit">
-            <input type="text" placeholder="e.g. Heating">
-            <button onclick="zoneSave('{{ s.ieee_address }}')">&#10003;</button>
-            <button onclick="zoneCancel('{{ s.ieee_address }}')">&#10007;</button>
-          </span>
-        </td>
+        <td>{{ s.zone or "-" }}</td>
         <td>{{ s.timestamp }}</td>
         <td>{% if s.temperature_c is not none %}{{ "%.1f"|format(s.temperature_c) }}{% else %}-{% endif %}</td>
         <td>
@@ -1014,14 +933,7 @@ def dashboard():
       {% for h in hive %}
       <tr>
         <td>{{ h.friendly_name or h.ieee_address }}</td>
-        <td class="zone-cell" id="zc-{{ h.ieee_address }}">
-          <span class="zone-val" onclick="zoneEdit('{{ h.ieee_address }}','{{ h.zone or '' }}')" title="Click to edit zone">{{ h.zone or "-" }}</span>
-          <span class="zone-edit">
-            <input type="text" placeholder="e.g. Zone 1">
-            <button onclick="zoneSave('{{ h.ieee_address }}')">&#10003;</button>
-            <button onclick="zoneCancel('{{ h.ieee_address }}')">&#10007;</button>
-          </span>
-        </td>
+        <td>{{ h.zone or "-" }}</td>
         <td>{{ h.timestamp }}</td>
         <td>{% if h.temperature_c is not none %}{{ "%.1f"|format(h.temperature_c) }}{% else %}-{% endif %}</td>
         <td>{% if h.target_temp_c is not none %}{{ "%.1f"|format(h.target_temp_c) }}{% else %}-{% endif %}</td>
@@ -1070,14 +982,7 @@ def dashboard():
       {% for s in outdoor %}
       <tr>
         <td>{{ s.friendly_name or s.ieee_address }}</td>
-        <td class="zone-cell" id="zc-{{ s.ieee_address }}">
-          <span class="zone-val" onclick="zoneEdit('{{ s.ieee_address }}','{{ s.zone or '' }}')" title="Click to edit zone">{{ s.zone or "-" }}</span>
-          <span class="zone-edit">
-            <input type="text" placeholder="e.g. Zone 4">
-            <button onclick="zoneSave('{{ s.ieee_address }}')">&#10003;</button>
-            <button onclick="zoneCancel('{{ s.ieee_address }}')">&#10007;</button>
-          </span>
-        </td>
+        <td>{{ s.zone or "-" }}</td>
         <td>{{ s.timestamp }}</td>
         <td>{% if s.temperature_c is not none %}{{ "%.1f"|format(s.temperature_c) }}{% else %}-{% endif %}</td>
         <td>{% if s.humidity_pct is not none %}{{ "%.1f"|format(s.humidity_pct) }}{% else %}-{% endif %}</td>
@@ -1115,14 +1020,7 @@ def dashboard():
       {% for s in attic %}
       <tr>
         <td>{{ s.friendly_name or s.ieee_address }}</td>
-        <td class="zone-cell" id="zc-{{ s.ieee_address }}">
-          <span class="zone-val" onclick="zoneEdit('{{ s.ieee_address }}','{{ s.zone or '' }}')" title="Click to edit zone">{{ s.zone or "-" }}</span>
-          <span class="zone-edit">
-            <input type="text" placeholder="e.g. Zone 5">
-            <button onclick="zoneSave('{{ s.ieee_address }}')">&#10003;</button>
-            <button onclick="zoneCancel('{{ s.ieee_address }}')">&#10007;</button>
-          </span>
-        </td>
+        <td>{{ s.zone or "-" }}</td>
         <td>{{ s.timestamp }}</td>
         <td>{% if s.temperature_c is not none %}{{ "%.1f"|format(s.temperature_c) }}{% else %}-{% endif %}</td>
         <td>{% if s.humidity_pct is not none %}{{ "%.1f"|format(s.humidity_pct) }}{% else %}-{% endif %}</td>
@@ -1161,14 +1059,7 @@ def dashboard():
       {% for s in shelly %}
       <tr>
         <td>{{ s.friendly_name or s.ieee_address }}</td>
-        <td class="zone-cell" id="zc-{{ s.ieee_address }}">
-          <span class="zone-val" onclick="zoneEdit('{{ s.ieee_address }}','{{ s.zone or '' }}')" title="Click to edit zone">{{ s.zone or "-" }}</span>
-          <span class="zone-edit">
-            <input type="text" placeholder="e.g. Zone 5">
-            <button onclick="zoneSave('{{ s.ieee_address }}')">&#10003;</button>
-            <button onclick="zoneCancel('{{ s.ieee_address }}')">&#10007;</button>
-          </span>
-        </td>
+        <td>{{ s.zone or "-" }}</td>
         <td>{{ s.timestamp }}</td>
         <td>{% if s.temperature_c is not none %}{{ "%.1f"|format(s.temperature_c) }}{% else %}-{% endif %}</td>
         <td>{% if s.humidity_pct is not none %}{{ "%.1f"|format(s.humidity_pct) }}{% else %}-{% endif %}</td>
@@ -1202,14 +1093,7 @@ def dashboard():
       {% for p in plugs %}
       <tr>
         <td>{{ p.friendly_name or p.ieee_address }}{% if p.name_source == 'z2m' %}<span class="z2m-badge" title="Name from Zigbee2MQTT">z2m</span>{% endif %}</td>
-        <td class="zone-cell" id="zc-{{ p.ieee_address }}">
-          <span class="zone-val" onclick="zoneEdit('{{ p.ieee_address }}','{{ p.zone or '' }}')" title="Click to edit zone">{{ p.zone or "-" }}</span>
-          <span class="zone-edit">
-            <input type="text" placeholder="e.g. Zone 1">
-            <button onclick="zoneSave('{{ p.ieee_address }}')">&#10003;</button>
-            <button onclick="zoneCancel('{{ p.ieee_address }}')">&#10007;</button>
-          </span>
-        </td>
+        <td>{{ p.zone or "-" }}</td>
         <td>{{ p.timestamp }}</td>
         <td class="status-{{ p.state or 'off' }}">{{ p.state or "-" }}</td>
         <td>{% if p.power_w is not none %}{{ "%.2f"|format(p.power_w) }}{% else %}-{% endif %}</td>
@@ -1313,34 +1197,6 @@ const probeChart = {{ probe_chart|tojson }};
   });
 })();
 
-function zoneEdit(ieee, currentZone) {
-  var cell = document.getElementById('zc-' + ieee);
-  var val = cell.querySelector('.zone-val');
-  var editDiv = cell.querySelector('.zone-edit');
-  var inp = editDiv.querySelector('input');
-  inp.value = currentZone === '-' ? '' : currentZone;
-  val.style.display = 'none';
-  editDiv.style.display = 'inline';
-  inp.focus();
-}
-function zoneSave(ieee) {
-  var cell = document.getElementById('zc-' + ieee);
-  var inp = cell.querySelector('.zone-edit input');
-  var newZone = inp.value.trim() || null;
-  fetch('/api/sensors/' + encodeURIComponent(ieee) + '/zone', {
-    method: 'PATCH',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({zone: newZone})
-  }).then(function(r){ return r.json(); }).then(function(d){
-    if (d.ok) { location.reload(); }
-    else { alert('Failed: ' + d.error); }
-  });
-}
-function zoneCancel(ieee) {
-  var cell = document.getElementById('zc-' + ieee);
-  cell.querySelector('.zone-val').style.display = '';
-  cell.querySelector('.zone-edit').style.display = 'none';
-}
 </script>
 </body>
 </html>
@@ -1348,356 +1204,26 @@ function zoneCancel(ieee) {
     return render_template_string(html, **snapshot)
 
 
-@app.route("/onboarding")
-def onboarding_page():
-    """One-sensor-at-a-time onboarding workflow."""
-    html = """
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sensor Onboarding</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 20px; color: #222; background: #fafafa; }
-    h1, h2 { margin-bottom: 8px; }
-    .meta { color: #666; margin-bottom: 16px; }
-    .card { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 14px; margin-bottom: 14px; }
-    input, select, button { padding: 8px; margin: 4px 0; }
-    button { cursor: pointer; }
-    .ok { color: #0b7a0b; font-weight: bold; }
-    .err { color: #b00020; font-weight: bold; }
-    .muted { color: #666; }
-    code { background: #f2f2f2; padding: 2px 4px; border-radius: 4px; }
-  </style>
-</head>
-<body>
-  <h1>&#128268; Sensor Onboarding</h1>
-  <div class="meta"><a href="/dashboard">&#127968; Dashboard</a> | <a href="/system">&#128202; System Status</a></div>
-
-  <div class="card">
-    <h2>1) Unlock</h2>
-    <label>Passcode:</label><br>
-    <input id="passcode" type="password" placeholder="Enter onboarding passcode">
-    <button onclick="unlock()">Unlock</button>
-    <div id="authMsg" class="muted"></div>
-    <div id="tempCodePanel" style="display:none; margin-top:10px;">
-      <button onclick="createTempCode()">Generate temporary sharing passcode (15 min)</button>
-      <div id="tempCodeMsg" class="muted"></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>2) Start Zigbee2MQTT pairing</h2>
-    <div class="muted">This page asks Zigbee2MQTT to open a 120-second permit-join window. Devices are added in Zigbee2MQTT first, then synced into this logger.</div>
-    <button onclick="startPairing()">Start 120s Zigbee2MQTT pairing window</button>
-    <div id="pairMsg" class="muted"></div>
-  </div>
-
-  <div class="card">
-    <h2>3) Detected Zigbee2MQTT device</h2>
-    <div>Candidate IEEE: <code id="candidateIeee">-</code></div>
-    <div>Model: <code id="candidateModel">-</code></div>
-    <div>Joined: <code id="candidateJoined">-</code></div>
-    <div>First reading: <code id="firstReading">-</code></div>
-  </div>
-
-  <div class="card">
-    <h2>4) Sync name and zone into this logger</h2>
-    <label>IEEE address</label><br>
-    <input id="ieeeAddress" placeholder="a4:c1:38:.."><br>
-    <label>Friendly name</label><br>
-    <input id="friendlyName" placeholder="Attic Probe"><br>
-    <label>Zone</label><br>
-    <input id="zone" placeholder="Zone 5"><br>
-    <button onclick="saveSensor()">Save sensor metadata</button>
-    <div id="saveMsg" class="muted"></div>
-  </div>
-
-  <div class="card">
-    <h2>Onboarding status</h2>
-    <div id="statusSummary" class="muted">Loading...</div>
-    <button onclick="refreshStatus()">Refresh now</button>
-  </div>
-
-<script>
-let currentPasscode = "";
-let unlocked = false;
-
-async function postJson(url, body) {
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify(body),
-  });
-  return await resp.json();
-}
-
-async function unlock() {
-  const pass = document.getElementById("passcode").value;
-  const data = await postJson("/api/onboarding/auth", {passcode: pass});
-  if (!data.ok) {
-    document.getElementById("authMsg").innerHTML = `<span class="err">${data.error}</span>`;
-    return;
-  }
-  currentPasscode = pass;
-  unlocked = true;
-  document.getElementById("authMsg").innerHTML = `<span class="ok">Unlocked</span>`;
-  document.getElementById("tempCodePanel").style.display = data.is_admin ? "block" : "none";
-}
-
-async function createTempCode() {
-  if (!unlocked) return;
-  const data = await postJson("/api/onboarding/temp-passcode", {passcode: currentPasscode});
-  if (!data.ok) {
-    document.getElementById("tempCodeMsg").innerHTML = `<span class="err">${data.error}</span>`;
-    return;
-  }
-  document.getElementById("tempCodeMsg").innerHTML =
-    `<span class="ok">Temp passcode: <code>${data.passcode}</code> (expires ${data.expires_at})</span>`;
-}
-
-async function startPairing() {
-  if (!unlocked) {
-    document.getElementById("pairMsg").innerHTML = `<span class="err">Unlock first.</span>`;
-    return;
-  }
-  const data = await postJson("/api/onboarding/start-pairing", {passcode: currentPasscode});
-  if (!data.ok) {
-    document.getElementById("pairMsg").innerHTML = `<span class="err">${data.error}</span>`;
-    return;
-  }
-  document.getElementById("pairMsg").innerHTML =
-    `<span class="ok">Zigbee2MQTT pairing started.</span> TCP before pairing: ${data.tcp_precheck_ok ? "OK" : "FAILED"} (${data.tcp_precheck_detail})`;
-  refreshStatus();
-}
-
-async function saveSensor() {
-  if (!unlocked) {
-    document.getElementById("saveMsg").innerHTML = `<span class="err">Unlock first.</span>`;
-    return;
-  }
-  const payload = {
-    passcode: currentPasscode,
-    ieee_address: document.getElementById("ieeeAddress").value.trim(),
-    friendly_name: document.getElementById("friendlyName").value.trim(),
-    zone: document.getElementById("zone").value.trim()
-  };
-  const data = await postJson("/api/onboarding/save-sensor", payload);
-  if (!data.ok) {
-    document.getElementById("saveMsg").innerHTML = `<span class="err">${data.error}</span>`;
-    return;
-  }
-  document.getElementById("saveMsg").innerHTML =
-    `<span class="ok">Saved. Updated DB and config.py for ${payload.ieee_address}.</span>`;
-  refreshStatus();
-}
-
-function _setText(id, value) {
-  document.getElementById(id).textContent = value ?? "-";
-}
-
-async function refreshStatus() {
-  const resp = await fetch("/api/onboarding/status");
-  const data = await resp.json();
-  _setText("candidateIeee", data.state.candidate_ieee || "-");
-  _setText("candidateModel", data.state.candidate_model || "-");
-  _setText("candidateJoined", data.state.candidate_joined_at || "-");
-  if (data.state.candidate_ieee) {
-    document.getElementById("ieeeAddress").value = data.state.candidate_ieee;
-  }
-
-  if (data.first_reading && data.first_reading.timestamp) {
-    _setText("firstReading", `${data.first_reading.timestamp} temp=${data.first_reading.temperature_c ?? "-"} humidity=${data.first_reading.humidity_pct ?? "-"} battery=${data.first_reading.battery_pct ?? "-"}`);
-  } else if (data.first_reading_waiting) {
-    _setText("firstReading", `Waiting (deadline ${data.first_reading_deadline || "-"})`);
-  } else {
-    _setText("firstReading", "-");
-  }
-
-  const tcpBefore = data.state.tcp_precheck_ok;
-  const tcpAfter = data.state.tcp_postcheck_ok;
-  const statusText = [
-    `Pairing active: ${data.state.pairing_active ? "yes" : "no"}`,
-    `Pairing window: ${data.state.pairing_started_at || "-"} -> ${data.state.pairing_ends_at || "-"}`,
-    `TCP pre-check: ${tcpBefore === null ? "-" : (tcpBefore ? "OK" : "FAILED")}`,
-    `TCP post-check: ${tcpAfter === null ? "-" : (tcpAfter ? "OK" : "FAILED")}`,
-    `TCP now: ${data.tcp_now_ok ? "OK" : "FAILED"} (${data.tcp_now_detail})`,
-    data.state.last_error ? `Last error: ${data.state.last_error}` : ""
-  ].filter(Boolean).join(" | ");
-  document.getElementById("statusSummary").textContent = statusText;
-}
-
-setInterval(refreshStatus, 5000);
-refreshStatus();
-</script>
-</body>
-</html>
-"""
-    return render_template_string(html)
-
-
-@app.route("/api/onboarding/auth", methods=["POST"])
-def api_onboarding_auth():
-    conn = get_db_write()
-    try:
-        payload = request.get_json(silent=True) or {}
-        passcode = str(payload.get("passcode", ""))
-        if not os.environ.get("ONBOARDING_PASSCODE"):
-            return jsonify({"ok": False, "error": "ONBOARDING_PASSCODE is not configured on the server."}), 503
-        result = _onboarding_auth_result(conn, passcode)
-        return jsonify(result), (200 if result.get("ok") else 401)
-    finally:
-        conn.close()
-
-
-@app.route("/api/onboarding/temp-passcode", methods=["POST"])
-def api_onboarding_temp_passcode():
-    conn = get_db_write()
-    try:
-        payload = request.get_json(silent=True) or {}
-        passcode = str(payload.get("passcode", ""))
-        if not _is_admin_passcode(passcode):
-            return jsonify({"ok": False, "error": "Admin passcode required."}), 403
-        temp_code, expires_at = create_temp_passcode(conn, ttl_minutes=15)
-        return jsonify({
-            "ok": True,
-            "passcode": temp_code,
-            "expires_at": expires_at,
-        })
-    finally:
-        conn.close()
-
-
-@app.route("/api/onboarding/start-pairing", methods=["POST"])
-def api_onboarding_start_pairing():
-    conn = get_db_write()
-    try:
-        payload = request.get_json(silent=True) or {}
-        passcode = str(payload.get("passcode", ""))
-        auth = _onboarding_auth_result(conn, passcode)
-        if not auth.get("ok"):
-            return jsonify(auth), 401
-
-        tcp_ok, tcp_detail = _check_dongle_tcp()
-        set_tcp_check_state(conn, precheck_ok=tcp_ok)
-        if not tcp_ok:
-            return jsonify({
-                "ok": False,
-                "error": f"Dongle-M TCP pre-check failed: {tcp_detail}",
-                "tcp_precheck_ok": False,
-                "tcp_precheck_detail": tcp_detail,
-            }), 503
-
-        command_id = queue_start_pairing(conn)
-        return jsonify({
-            "ok": True,
-            "command_id": command_id,
-            "tcp_precheck_ok": True,
-            "tcp_precheck_detail": tcp_detail,
-        })
-    finally:
-        conn.close()
-
-
-@app.route("/api/onboarding/save-sensor", methods=["POST"])
-def api_onboarding_save_sensor():
-    conn = get_db_write()
-    try:
-        payload = request.get_json(silent=True) or {}
-        passcode = str(payload.get("passcode", ""))
-        auth = _onboarding_auth_result(conn, passcode)
-        if not auth.get("ok"):
-            return jsonify(auth), 401
-
-        ieee_address = str(payload.get("ieee_address", "")).strip().lower()
-        friendly_name = str(payload.get("friendly_name", "")).strip()
-        zone = str(payload.get("zone", "")).strip()
-        if not ieee_address or not friendly_name or not zone:
-            return jsonify({"ok": False, "error": "ieee_address, friendly_name and zone are required."}), 400
-
-        save_sensor_metadata(
-            conn,
-            ieee_address=ieee_address,
-            friendly_name=friendly_name,
-            zone=zone,
-        )
-        return jsonify({"ok": True})
-    except ValueError as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 500
-    finally:
-        conn.close()
-
-
-@app.route("/api/onboarding/status")
-def api_onboarding_status():
-    conn = get_db_write()
-    try:
-        state = get_onboarding_state(conn)
-        candidate_ieee = state.get("candidate_ieee")
-        candidate_joined_at = state.get("candidate_joined_at")
-        first_reading = None
-        if candidate_ieee:
-            if candidate_joined_at:
-                row = conn.execute(
-                    """
-                    SELECT timestamp, temperature_c, humidity_pct, battery_pct
-                    FROM readings
-                    WHERE ieee_address = ?
-                      AND timestamp >= ?
-                    ORDER BY timestamp ASC
-                    LIMIT 1
-                    """,
-                    (candidate_ieee, candidate_joined_at),
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    """
-                    SELECT timestamp, temperature_c, humidity_pct, battery_pct
-                    FROM readings
-                    WHERE ieee_address = ?
-                    ORDER BY timestamp DESC
-                    LIMIT 1
-                    """,
-                    (candidate_ieee,),
-                ).fetchone()
-            if row:
-                first_reading = dict(row)
-
-        now_dt = datetime.now()
-        deadline = None
-        first_reading_waiting = False
-        if candidate_joined_at:
-            joined_ts = _parse_iso_timestamp(candidate_joined_at)
-            deadline_dt = joined_ts + timedelta(minutes=5)
-            deadline = deadline_dt.strftime("%Y-%m-%dT%H:%M:%S")
-            first_reading_waiting = first_reading is None and now_dt < deadline_dt
-
-        tcp_now_ok, tcp_now_detail = _check_dongle_tcp()
-        if not state.get("pairing_active") and state.get("pairing_ends_at"):
-            set_tcp_check_state(conn, postcheck_ok=tcp_now_ok)
-            state = get_onboarding_state(conn)
-
-        return jsonify({
-            "ok": True,
-            "state": state,
-            "first_reading": first_reading,
-            "first_reading_waiting": first_reading_waiting,
-            "first_reading_deadline": deadline,
-            "tcp_now_ok": tcp_now_ok,
-            "tcp_now_detail": tcp_now_detail,
-        })
-    finally:
-        conn.close()
-
-
 @app.route("/api/sensors")
 def api_sensors():
     """List all registered sensors."""
     conn = get_db()
     rows = conn.execute(
-        "SELECT ieee_address, friendly_name, model, COALESCE(zone_override, zone) AS zone, first_seen, last_seen "
-        "FROM sensors ORDER BY friendly_name"
+        """
+        SELECT s.ieee_address, s.friendly_name, s.model,
+               COALESCE(s.zone_override, s.zone, latest.zone) AS zone,
+               s.first_seen, s.last_seen
+        FROM sensors s
+        LEFT JOIN (
+            SELECT reading.ieee_address, reading.zone
+            FROM readings reading
+            INNER JOIN (
+                SELECT ieee_address, MAX(id) AS max_id
+                FROM readings GROUP BY ieee_address
+            ) newest ON reading.id=newest.max_id
+        ) latest ON s.ieee_address=latest.ieee_address
+        ORDER BY s.friendly_name
+        """
     ).fetchall()
     conn.close()
 
@@ -1722,7 +1248,9 @@ def api_readings():
     query = """
         SELECT r.ieee_address, s.friendly_name, r.timestamp, r.reading_date, r.reading_time,
                r.temperature_c, r.humidity_pct, r.battery_pct, r.battery_voltage_mv,
-               r.link_quality, r.rssi, r.zone, r.state, r.power_w, r.energy_kwh,
+               r.link_quality, r.rssi,
+               COALESCE(s.zone_override, s.zone, r.zone) AS zone,
+               r.state, r.power_w, r.energy_kwh,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
                r.device_min_temp_c, r.device_max_temp_c,
                r.device_min_humidity_pct, r.device_max_humidity_pct
@@ -1742,7 +1270,7 @@ def api_readings():
         query += " AND r.ieee_address = ?"
         params.append(sensor)
     if zone:
-        query += " AND COALESCE(s.zone_override, r.zone) = ?"
+        query += " AND COALESCE(s.zone_override, s.zone, r.zone) = ?"
         params.append(zone)
 
     query += " ORDER BY r.timestamp DESC LIMIT ?"
@@ -1765,16 +1293,18 @@ def api_readings_latest():
     rows = conn.execute("""
         SELECT r.ieee_address, s.friendly_name, r.timestamp, r.reading_date, r.reading_time,
                r.temperature_c, r.humidity_pct, r.battery_pct, r.battery_voltage_mv,
-               r.link_quality, r.rssi, r.zone, r.state, r.power_w, r.energy_kwh,
+               r.link_quality, r.rssi,
+               COALESCE(s.zone_override, s.zone, r.zone) AS zone,
+               r.state, r.power_w, r.energy_kwh,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
                r.device_min_temp_c, r.device_max_temp_c,
                r.device_min_humidity_pct, r.device_max_humidity_pct
         FROM readings r
         INNER JOIN (
-            SELECT ieee_address, MAX(timestamp) as max_ts
+            SELECT ieee_address, MAX(id) as max_id
             FROM readings GROUP BY ieee_address
         ) latest ON r.ieee_address = latest.ieee_address
-                AND r.timestamp = latest.max_ts
+                AND r.id = latest.max_id
         LEFT JOIN sensors s ON r.ieee_address = s.ieee_address
         ORDER BY s.friendly_name
     """).fetchall()
@@ -1797,7 +1327,9 @@ def api_export_csv():
     query = """
         SELECT r.ieee_address, s.friendly_name, r.timestamp, r.reading_date, r.reading_time,
                r.temperature_c, r.humidity_pct, r.battery_pct, r.battery_voltage_mv,
-               r.link_quality, r.rssi, r.zone, r.state, r.power_w, r.energy_kwh,
+               r.link_quality, r.rssi,
+               COALESCE(s.zone_override, s.zone, r.zone) AS zone,
+               r.state, r.power_w, r.energy_kwh,
                r.heating_on, r.boost_on, r.target_temp_c, r.heating_mode,
                r.device_min_temp_c, r.device_max_temp_c,
                r.device_min_humidity_pct, r.device_max_humidity_pct
@@ -1814,7 +1346,7 @@ def api_export_csv():
         query += " AND r.timestamp <= ?"
         params.append(end)
     if zone:
-        query += " AND COALESCE(s.zone_override, r.zone) = ?"
+        query += " AND COALESCE(s.zone_override, s.zone, r.zone) = ?"
         params.append(zone)
 
     query += " ORDER BY r.timestamp ASC"
@@ -1857,7 +1389,6 @@ def run_server(host: str = "0.0.0.0", port: int = 8080) -> None:
     print(f"{'='*50}")
     print(f"\nEndpoints:")
     print(f"  GET /dashboard           - Live sensor dashboard")
-    print(f"  GET /onboarding          - Sensor onboarding workflow")
     print(f"  GET /system              - Pi + app system status")
     print(f"  GET /api/status          - System overview")
     print(f"  GET /api/dashboard       - Dashboard JSON data")

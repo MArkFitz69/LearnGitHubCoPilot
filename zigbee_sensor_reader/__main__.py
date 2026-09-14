@@ -1,13 +1,4 @@
-"""
-Main entry point for the Zigbee Sensor Reader.
-
-Usage:
-    python -m zigbee_sensor_reader              # Start collecting data
-    python -m zigbee_sensor_reader --pair        # Open network for new sensors
-    python -m zigbee_sensor_reader --export csv  # Export data to CSV
-    python -m zigbee_sensor_reader --export xlsx # Export data to Excel
-    python -m zigbee_sensor_reader --summary     # Show sensor summary
-"""
+"""Command-line entry point and long-running sensor collector."""
 
 import argparse
 import asyncio
@@ -19,17 +10,12 @@ from .config import (
     ESP32_SENSOR_ZONES,
     POLLING_INTERVAL,
     SENSOR_NAMES,
+    SHELLY_AUTHORITATIVE_SOURCES,
+    SHELLY_SENSORS,
     ZONES,
 )
 from .database import get_connection, insert_reading, upsert_sensor
 from .export import export_to_csv, export_to_excel, get_sensor_summary
-from .onboarding import (
-    fetch_pending_commands,
-    mark_command_done,
-    mark_command_failed,
-    record_first_reading,
-    set_pairing_state,
-)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,190 +27,162 @@ logger = logging.getLogger(__name__)
 
 def _get_sensor_metadata(conn, ieee_address: str):
     return conn.execute(
-        "SELECT friendly_name, zone, zone_override FROM sensors WHERE ieee_address = ?",
+        """
+        SELECT friendly_name, zone, zone_override
+        FROM sensors WHERE ieee_address=?
+        """,
         (ieee_address,),
     ).fetchone()
 
 
-def handle_reading(reading, conn) -> bool:
-    """Process an incoming sensor reading: store in DB and print to console."""
-    existing = _get_sensor_metadata(conn, reading.ieee_address)
-    # Use zone_override (set by z2m description or dashboard) first, then sensors.zone, then config
-    zone = ZONES.get(reading.ieee_address)
-    if not zone and existing:
-        zone = existing["zone_override"] or existing["zone"]
-    if getattr(reading, "zone", None):
-        zone = reading.zone
-    friendly_name = reading.friendly_name
-    if (not friendly_name or friendly_name == reading.ieee_address) and existing:
-        friendly_name = existing["friendly_name"] or reading.friendly_name
-    upsert_sensor(
-        conn,
-        ieee_address=reading.ieee_address,
-        friendly_name=friendly_name,
-        model=reading.model,
-        zone=zone,
-    )
-
-    stored = insert_reading(
-        conn,
-        ieee_address=reading.ieee_address,
-        temperature_c=reading.temperature_c,
-        humidity_pct=reading.humidity_pct,
-        battery_pct=reading.battery_pct,
-        link_quality=reading.link_quality,
-        zone=zone,
-        state=getattr(reading, "state", None),
-        power_w=getattr(reading, "power_w", None),
-        energy_kwh=getattr(reading, "energy_kwh", None),
-        device_min_temp_c=getattr(reading, "device_min_temp_c", None),
-        device_max_temp_c=getattr(reading, "device_max_temp_c", None),
-        device_min_humidity_pct=getattr(reading, "device_min_humidity_pct", None),
-        device_max_humidity_pct=getattr(reading, "device_max_humidity_pct", None),
-        battery_voltage_mv=getattr(reading, "battery_voltage_mv", None),
-        packet_id=getattr(reading, "packet_id", None),
-    )
-    if not stored:
-        logger.debug(
-            "Skipped duplicate packet %s for %s",
-            getattr(reading, "packet_id", None),
-            reading.ieee_address,
+def handle_reading(reading, conn=None) -> bool:
+    """Store one callback reading using a connection owned by this thread."""
+    owns_connection = conn is None
+    if owns_connection:
+        conn = get_connection()
+    try:
+        existing = _get_sensor_metadata(conn, reading.ieee_address)
+        zone = ZONES.get(reading.ieee_address)
+        if not zone and existing:
+            zone = existing["zone_override"] or existing["zone"]
+        if getattr(reading, "zone", None):
+            zone = reading.zone
+        friendly_name = reading.friendly_name
+        if (
+            (not friendly_name or friendly_name == reading.ieee_address)
+            and existing
+        ):
+            friendly_name = existing["friendly_name"] or reading.friendly_name
+        source = getattr(reading, "source", "z2m")
+        upsert_sensor(
+            conn,
+            ieee_address=reading.ieee_address,
+            friendly_name=friendly_name,
+            model=reading.model,
+            zone=(
+                ZONES.get(reading.ieee_address)
+                if source == "z2m"
+                else zone
+            ),
+            zone_override=(
+                getattr(reading, "zone", None)
+                if source == "z2m"
+                else None
+            ),
+            name_source="z2m" if source == "z2m" else "config",
         )
-        return False
-    record_first_reading(conn, reading.ieee_address)
 
-    parts = [f"[{friendly_name}]"]
-    if zone:
-        parts.append(f"({zone})")
-    if reading.temperature_c is not None:
-        parts.append(f"Temp: {reading.temperature_c:.1f}°C")
-    if reading.humidity_pct is not None:
-        parts.append(f"Humidity: {reading.humidity_pct:.1f}%")
-    if reading.battery_pct is not None:
-        parts.append(f"Battery: {reading.battery_pct:.0f}%")
-    if getattr(reading, "state", None):
-        parts.append(f"State: {reading.state}")
-    if getattr(reading, "power_w", None) is not None:
-        parts.append(f"Power: {reading.power_w:.2f}W")
-    if getattr(reading, "energy_kwh", None) is not None:
-        parts.append(f"Energy: {reading.energy_kwh:.3f}kWh")
-    bv = getattr(reading, "battery_voltage_mv", None)
-    if bv is not None:
-        parts.append(f"V: {bv/1000:.2f}V")
-    dmin = getattr(reading, "device_min_temp_c", None)
-    dmax = getattr(reading, "device_max_temp_c", None)
-    if dmin is not None and dmax is not None:
-        parts.append(f"Device min/max: {dmin:.1f}/{dmax:.1f}°C")
-    print("  ".join(parts))
-    return True
+        mac = (
+            reading.ieee_address.removeprefix("shelly:")
+            if reading.ieee_address.startswith("shelly:")
+            else None
+        )
+        stored = insert_reading(
+            conn,
+            ieee_address=reading.ieee_address,
+            temperature_c=reading.temperature_c,
+            humidity_pct=reading.humidity_pct,
+            battery_pct=reading.battery_pct,
+            link_quality=reading.link_quality,
+            zone=zone,
+            state=getattr(reading, "state", None),
+            power_w=getattr(reading, "power_w", None),
+            energy_kwh=getattr(reading, "energy_kwh", None),
+            device_min_temp_c=getattr(reading, "device_min_temp_c", None),
+            device_max_temp_c=getattr(reading, "device_max_temp_c", None),
+            device_min_humidity_pct=getattr(
+                reading, "device_min_humidity_pct", None
+            ),
+            device_max_humidity_pct=getattr(
+                reading, "device_max_humidity_pct", None
+            ),
+            battery_voltage_mv=getattr(reading, "battery_voltage_mv", None),
+            packet_id=getattr(reading, "packet_id", None),
+            source=source,
+            authoritative_source=(
+                SHELLY_AUTHORITATIVE_SOURCES.get(mac) if mac else None
+            ),
+        )
+        if not stored:
+            logger.debug(
+                "Skipped duplicate, stale, or non-authoritative packet %s for %s",
+                getattr(reading, "packet_id", None),
+                reading.ieee_address,
+            )
+            return False
 
-
-def _process_onboarding_commands(conn) -> None:
-    rows = fetch_pending_commands(conn)
-    if not rows:
-        return
-    for row in rows:
-        command_id = row["id"]
-        command = row["command"]
-        try:
-            if command == "start_pairing":
-                from .z2m_reader import Z2M_MQTT_HOST, Z2M_MQTT_PASS, Z2M_MQTT_PORT, Z2M_MQTT_TRANSPORT, Z2M_MQTT_USER, Z2M_TOPIC_PREFIX
-                import paho.mqtt.client as mqtt
-
-                completed = {"ok": False}
-
-                def on_connect(client, userdata, flags, rc):
-                    if rc != 0:
-                        completed["error"] = f"MQTT connect failed rc={rc}"
-                        return
-                    result = client.publish(
-                        f"{Z2M_TOPIC_PREFIX}/bridge/request/permit_join",
-                        '{"value": true, "time": 120}',
-                        qos=0,
-                    )
-                    if result.rc != 0:
-                        completed["error"] = f"permit_join publish failed rc={result.rc}"
-                        return
-                    completed["ok"] = True
-
-                client = mqtt.Client(transport=Z2M_MQTT_TRANSPORT)
-                client.on_connect = on_connect
-                if Z2M_MQTT_USER:
-                    client.username_pw_set(Z2M_MQTT_USER, Z2M_MQTT_PASS)
-                client.connect(Z2M_MQTT_HOST, Z2M_MQTT_PORT, keepalive=60)
-                client.loop_start()
-                time.sleep(2)
-                client.loop_stop()
-                client.disconnect()
-
-                if not completed.get("ok"):
-                    raise RuntimeError(completed.get("error", "permit_join was not acknowledged"))
-
-                set_pairing_state(conn, active=True, duration_seconds=120)
-                mark_command_done(conn, command_id)
-            else:
-                mark_command_failed(conn, command_id, f"Unsupported onboarding command: {command}")
-        except Exception as exc:
-            mark_command_failed(conn, command_id, str(exc))
+        parts = [f"[{friendly_name}]"]
+        if zone:
+            parts.append(f"({zone})")
+        if reading.temperature_c is not None:
+            parts.append(f"Temp: {reading.temperature_c:.1f}°C")
+        if reading.humidity_pct is not None:
+            parts.append(f"Humidity: {reading.humidity_pct:.1f}%")
+        if reading.battery_pct is not None:
+            parts.append(f"Battery: {reading.battery_pct:.0f}%")
+        if getattr(reading, "state", None):
+            parts.append(f"State: {reading.state}")
+        if getattr(reading, "power_w", None) is not None:
+            parts.append(f"Power: {reading.power_w:.2f}W")
+        if getattr(reading, "energy_kwh", None) is not None:
+            parts.append(f"Energy: {reading.energy_kwh:.3f}kWh")
+        print("  ".join(parts))
+        return True
+    finally:
+        if owns_connection:
+            conn.close()
 
 
-async def run_collector(pair: bool = False) -> None:
-    """Run the main data collection loop using Zigbee2MQTT via MQTT."""
+async def run_collector() -> None:
+    """Run independent MQTT callbacks alongside periodic Hive/BLE polling."""
     conn = get_connection()
-    logger.info("Database ready at %s", conn.execute("PRAGMA database_list").fetchone()[2])
-
-    # Seed any pre-configured sensor names (config.py fallback, z2m will overwrite)
+    logger.info(
+        "Database ready at %s",
+        conn.execute("PRAGMA database_list").fetchone()[2],
+    )
     for ieee, name in SENSOR_NAMES.items():
-        upsert_sensor(conn, ieee_address=ieee, friendly_name=name, zone=ZONES.get(ieee))
+        upsert_sensor(
+            conn,
+            ieee_address=ieee,
+            friendly_name=name,
+            zone=ZONES.get(ieee),
+        )
+    for mac, name in SHELLY_SENSORS.items():
+        upsert_sensor(
+            conn,
+            ieee_address=f"shelly:{mac}",
+            friendly_name=name,
+            model="Shelly Blu H&T",
+            zone=ZONES.get(mac),
+        )
     from .esp32_mqtt_reader import sensor_identity
     for sensor_key, name in ESP32_SENSOR_NAMES.items():
         upsert_sensor(
             conn,
             ieee_address=sensor_identity(sensor_key),
             friendly_name=name,
-            model="Shelly Blu H&T" if sensor_key == "shelly_raw_payload" else "ESP32 Dallas Temperature",
+            model=(
+                "Shelly Blu H&T"
+                if sensor_key == "shelly_raw_payload"
+                else "ESP32 Dallas Temperature"
+            ),
             zone=ESP32_SENSOR_ZONES.get(sensor_key),
         )
+    conn.close()
 
-    if pair:
-        logger.info(
-            "Note: pairing is managed by Zigbee2MQTT. "
-            "Use the z2m web UI at http://home-logger:8080 to permit joining."
-        )
+    from .esp32_mqtt_reader import run_esp32_mqtt_reader
+    from .z2m_reader import run_z2m_reader
 
-    logger.info(
-        "Starting data collection via Zigbee2MQTT MQTT (host=%s port=%d). "
-        "Hive poll interval: %ds",
-        __import__("os").environ.get("Z2M_MQTT_HOST", "home-logger"),
-        int(__import__("os").environ.get("Z2M_MQTT_PORT", "8081")),
-        POLLING_INTERVAL,
-    )
-
-    try:
-        from .z2m_reader import run_z2m_reader
+    mqtt_tasks = [
         asyncio.create_task(
             run_z2m_reader(
-                on_reading=lambda reading: handle_reading(reading, conn),
-                get_conn_fn=lambda: conn,
+                on_reading=handle_reading,
+                get_conn_fn=get_connection,
             )
-        )
-        logger.info("Zigbee2MQTT sensor reader started")
-    except Exception as exc:
-        logger.error("Could not start z2m reader: %s", exc)
-
-    esp32_conn = get_connection()
-    try:
-        from .esp32_mqtt_reader import run_esp32_mqtt_reader
-        asyncio.create_task(
-            run_esp32_mqtt_reader(
-                on_reading=lambda reading: handle_reading(reading, esp32_conn),
-            )
-        )
-        logger.info("ESP32 MQTT sensor reader started")
-    except Exception as exc:
-        esp32_conn.close()
-        esp32_conn = None
-        logger.error("Could not start ESP32 MQTT reader: %s", exc)
+        ),
+        asyncio.create_task(run_esp32_mqtt_reader(on_reading=handle_reading)),
+    ]
+    logger.info("Zigbee2MQTT and ESP32 MQTT readers started")
 
     try:
         next_poll = 0.0
@@ -232,166 +190,87 @@ async def run_collector(pair: bool = False) -> None:
             await asyncio.sleep(1)
             now = time.monotonic()
             if now < next_poll:
-                _process_onboarding_commands(conn)
                 continue
             next_poll = now + POLLING_INTERVAL
-            _process_onboarding_commands(conn)
-
-            # Poll Hive thermostats + hot water
             try:
-                from .hive_reader import poll_hive, HIVE_USERNAME
+                from .hive_reader import HIVE_USERNAME, poll_hive
                 if HIVE_USERNAME:
                     await poll_hive()
-            except Exception as e:
-                logger.debug("Hive poll skipped: %s", e)
-
-            # Poll Shelly Blu sensors via BLE (if bleak is available)
+            except Exception as exc:
+                logger.warning("Hive poll failed: %s", exc)
             try:
-                from .shelly_ble_reader import poll_shelly_ble
                 from .config import SHELLY_SCAN_DURATION
+                from .shelly_ble_reader import poll_shelly_ble
                 await poll_shelly_ble(scan_duration=SHELLY_SCAN_DURATION)
             except ImportError:
-                pass  # bleak not installed
-            except Exception as e:
-                logger.debug("Shelly BLE poll skipped: %s", e)
-
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
+                logger.info("bleak is not installed; direct Shelly BLE is disabled")
+            except Exception as exc:
+                logger.warning("Shelly BLE poll failed: %s", exc)
     finally:
-        if esp32_conn is not None:
-            esp32_conn.close()
-        conn.close()
+        for task in mqtt_tasks:
+            task.cancel()
+        await asyncio.gather(*mqtt_tasks, return_exceptions=True)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Sonoff Zigbee Temperature & Humidity Sensor Reader",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python -m zigbee_sensor_reader                  Start collecting sensor data
-  python -m zigbee_sensor_reader --pair            Pair new sensors (120s window)
-  python -m zigbee_sensor_reader --export csv      Export all data to CSV
-  python -m zigbee_sensor_reader --export xlsx     Export all data to Excel
-  python -m zigbee_sensor_reader --summary         Show sensor summary stats
-  python -m zigbee_sensor_reader --export csv --start 2026-01-01 --end 2026-07-01
-        """,
+        description="Home sensor reader using Zigbee2MQTT, ESP32 MQTT, Hive, and BLE",
     )
-    parser.add_argument(
-        "--pair",
-        action="store_true",
-        help="Open network for new sensors to join (120 second window)",
-    )
-    parser.add_argument(
-        "--export",
-        choices=["csv", "xlsx"],
-        help="Export data to CSV or Excel file",
-    )
-    parser.add_argument(
-        "--summary",
-        action="store_true",
-        help="Show summary statistics for all sensors",
-    )
-    parser.add_argument(
-        "--start",
-        help="Start date filter for exports (ISO format, e.g. 2026-01-01)",
-    )
-    parser.add_argument(
-        "--end",
-        help="End date filter for exports (ISO format, e.g. 2026-07-31)",
-    )
-    parser.add_argument(
-        "--sensor",
-        help="Filter to a specific sensor IEEE address",
-    )
-    parser.add_argument(
-        "--hive",
-        action="store_true",
-        help="Test Hive API connection and fetch current thermostat data",
-    )
-    parser.add_argument(
-        "--discover-shelly",
-        action="store_true",
-        help="Scan for Shelly Blu H&T sensors via Bluetooth and show their MAC addresses",
-    )
-    parser.add_argument(
-        "--serve",
-        action="store_true",
-        help="Start the web API server for remote data access (Power BI, Excel)",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8080,
-        help="Port for the web API server (default: 8080)",
-    )
-
+    parser.add_argument("--export", choices=["csv", "xlsx"])
+    parser.add_argument("--summary", action="store_true")
+    parser.add_argument("--start")
+    parser.add_argument("--end")
+    parser.add_argument("--sensor")
+    parser.add_argument("--hive", action="store_true")
+    parser.add_argument("--discover-shelly", action="store_true")
+    parser.add_argument("--serve", action="store_true")
+    parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
 
     if args.discover_shelly:
         from .shelly_ble_reader import discover_shelly_sensors
-        print("Scanning for Shelly Blu sensors (30 seconds)...")
-        print("Make sure the sensor is nearby and has battery.")
         results = asyncio.run(discover_shelly_sensors(scan_duration=30.0))
-        if results:
-            print(f"\nFound {len(results)} sensor(s):")
-            for s in results:
-                print(f"  MAC: {s['mac']}  Name: {s.get('name', '?')}")
-                print(f"       Temp: {s.get('temperature', '?')}°C  "
-                      f"Humidity: {s.get('humidity', '?')}%  "
-                      f"Battery: {s.get('battery', '?')}%")
-            print("\nAdd the MAC address to SHELLY_SENSORS in config.py:")
-            for s in results:
-                print(f'    "{s["mac"]}": "Outside",')
-        else:
-            print("\nNo sensors found. Try:")
-            print("  - Moving the sensor closer to the Pi")
-            print("  - Pressing the button on the sensor to wake it")
-            print("  - Running the scan for longer (set SHELLY_SCAN_DURATION=60)")
+        for sensor in results:
+            print(
+                f"{sensor['mac']}: {sensor.get('temperature', '?')}°C "
+                f"{sensor.get('humidity', '?')}% "
+                f"battery {sensor.get('battery', '?')}%"
+            )
         return
-
     if args.hive:
-        from .hive_reader import poll_hive, HIVE_USERNAME
+        from .hive_reader import HIVE_USERNAME, run_hive_poll
         if not HIVE_USERNAME:
             print("Set HIVE_USERNAME and HIVE_PASSWORD environment variables first.")
             return
-        print("Connecting to Hive API...")
-        readings = asyncio.run(poll_hive())
-        if readings:
-            print(f"\nFound {len(readings)} thermostat(s):")
-            for r in readings:
-                print(f"  {r['name']}: {r['temperature_c']}°C "
-                      f"(target: {r['target_temp_c']}°C, mode: {r['mode']})")
-        else:
-            print("No thermostat data returned. Check credentials.")
+        data = run_hive_poll()
+        for reading in data.get("heating", []):
+            print(
+                f"{reading['name']}: {reading['temperature_c']}°C "
+                f"(target: {reading['target_temp_c']}°C, mode: {reading['mode']})"
+            )
+        for reading in data.get("hotwater", []):
+            print(
+                f"{reading['name']}: {'ON' if reading['hw_on'] else 'OFF'} "
+                f"(mode: {reading['mode']})"
+            )
         return
-
     if args.summary:
         get_sensor_summary()
         return
-
     if args.serve:
+        from .config import WEB_HOST
         from .web_server import run_server
-        run_server(port=args.port)
+        run_server(host=WEB_HOST, port=args.port)
         return
-
     if args.export:
-        if args.export == "csv":
-            export_to_csv(
-                start_date=args.start,
-                end_date=args.end,
-                sensor_ieee=args.sensor,
-            )
-        elif args.export == "xlsx":
-            export_to_excel(
-                start_date=args.start,
-                end_date=args.end,
-                sensor_ieee=args.sensor,
-            )
+        exporter = export_to_csv if args.export == "csv" else export_to_excel
+        exporter(
+            start_date=args.start,
+            end_date=args.end,
+            sensor_ieee=args.sensor,
+        )
         return
-
-    # Default: run the data collector
-    asyncio.run(run_collector(pair=args.pair))
+    asyncio.run(run_collector())
 
 
 if __name__ == "__main__":

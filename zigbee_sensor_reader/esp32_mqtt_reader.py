@@ -4,30 +4,24 @@ import asyncio
 import json
 import logging
 import math
-import os
 import re
 from typing import Callable
 
 from .config import ESP32_SENSOR_NAMES, ESP32_SENSOR_ZONES, ESP32_TOPIC_PREFIX
 from .shelly_ble_reader import BTHomePayloadError, decode_bthome_v2_hex
-from .z2m_reader import (
-    Z2M_MQTT_HOST,
-    Z2M_MQTT_PASS,
-    Z2M_MQTT_PORT,
-    Z2M_MQTT_TRANSPORT,
-    Z2M_MQTT_USER,
-)
+from .mqtt_config import MQTTSettings
+from .z2m_reader import Z2M_MQTT_SETTINGS
 
 logger = logging.getLogger(__name__)
 
-ESP32_MQTT_HOST = os.environ.get("ESP32_MQTT_HOST", Z2M_MQTT_HOST)
-ESP32_MQTT_PORT = int(os.environ.get("ESP32_MQTT_PORT", str(Z2M_MQTT_PORT)))
-ESP32_MQTT_USER = os.environ.get("ESP32_MQTT_USER", Z2M_MQTT_USER)
-ESP32_MQTT_PASS = os.environ.get("ESP32_MQTT_PASS", Z2M_MQTT_PASS)
-ESP32_MQTT_TRANSPORT = os.environ.get(
-    "ESP32_MQTT_TRANSPORT",
-    Z2M_MQTT_TRANSPORT,
+ESP32_MQTT_SETTINGS = MQTTSettings.from_env(
+    "ESP32", defaults=Z2M_MQTT_SETTINGS
 )
+ESP32_MQTT_HOST = ESP32_MQTT_SETTINGS.host
+ESP32_MQTT_PORT = ESP32_MQTT_SETTINGS.port
+ESP32_MQTT_USER = ESP32_MQTT_SETTINGS.username
+ESP32_MQTT_PASS = ESP32_MQTT_SETTINGS.password
+ESP32_MQTT_TRANSPORT = ESP32_MQTT_SETTINGS.transport
 
 TOPIC_KEY_ALIASES = {
     "boiler1_out": "boiler1_out",
@@ -74,6 +68,7 @@ class ESP32SensorReading:
         self.device_max_temp_c = None
         self.device_min_humidity_pct = None
         self.device_max_humidity_pct = None
+        self.source = "esp32"
 
 
 ReadingCallback = Callable[[ESP32SensorReading], object]
@@ -284,8 +279,7 @@ async def run_esp32_mqtt_reader(
         client.on_connect = on_connect
         client.on_message = on_message
         client.on_disconnect = on_disconnect
-        if ESP32_MQTT_USER:
-            client.username_pw_set(ESP32_MQTT_USER, ESP32_MQTT_PASS)
+        ESP32_MQTT_SETTINGS.configure_client(client)
 
         try:
             client.connect_async(ESP32_MQTT_HOST, ESP32_MQTT_PORT, keepalive=60)
