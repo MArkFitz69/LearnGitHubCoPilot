@@ -162,6 +162,7 @@ def _create_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
     _migrate_normalise_ieee(conn)
     _migrate_outdoor_shelly(conn)
+    _migrate_attic_shelly(conn)
 
 
 def _normalise_ieee(raw: str) -> str:
@@ -289,6 +290,109 @@ def _migrate_outdoor_shelly(conn: sqlite3.Connection) -> None:
         """,
         (canonical, now, now),
     )
+    conn.commit()
+
+
+def _migrate_attic_shelly(conn: sqlite3.Connection) -> None:
+    """Merge the Attic Z2M EUI-64 into the physical Shelly BLE identity."""
+    canonical = "shelly:FC:4D:6A:1D:1D:FB"
+    alias = "fc:4d:6a:ff:fe:1d:1d:fb"
+    rows = conn.execute(
+        """
+        SELECT ieee_address, model, first_seen, last_seen
+        FROM sensors
+        WHERE ieee_address IN (?, ?)
+        """,
+        (canonical, alias),
+    ).fetchall()
+    by_identity = {row["ieee_address"]: row for row in rows}
+    canonical_row = by_identity.get(canonical)
+    alias_row = by_identity.get(alias)
+
+    timestamps_first = [
+        row["first_seen"] for row in rows if row["first_seen"]
+    ]
+    timestamps_last = [
+        row["last_seen"] for row in rows if row["last_seen"]
+    ]
+    reading_range = conn.execute(
+        """
+        SELECT MIN(timestamp) AS first_reading, MAX(timestamp) AS last_reading
+        FROM readings
+        WHERE ieee_address IN (?, ?)
+        """,
+        (canonical, alias),
+    ).fetchone()
+    if reading_range["first_reading"]:
+        timestamps_first.append(reading_range["first_reading"])
+    if reading_range["last_reading"]:
+        timestamps_last.append(reading_range["last_reading"])
+    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    first_seen = min(timestamps_first) if timestamps_first else now
+    last_seen = max(timestamps_last) if timestamps_last else now
+    models = [
+        row["model"] for row in (canonical_row, alias_row)
+        if row and row["model"]
+    ]
+    model = next(
+        (value for value in models if value.upper() == "SBHT-203C"),
+        models[0] if models else "Shelly Blu H&T",
+    )
+
+    conn.execute(
+        "UPDATE readings SET ieee_address = ? WHERE ieee_address = ?",
+        (canonical, alias),
+    )
+    conn.execute(
+        "UPDATE readings SET zone = 'Zone 5' WHERE ieee_address = ?",
+        (canonical,),
+    )
+
+    packet_row = conn.execute(
+        """
+        SELECT packet_id, updated_at
+        FROM mqtt_packet_state
+        WHERE ieee_address IN (?, ?)
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (canonical, alias),
+    ).fetchone()
+    conn.execute(
+        "DELETE FROM mqtt_packet_state WHERE ieee_address IN (?, ?)",
+        (canonical, alias),
+    )
+    conn.execute("DELETE FROM sensors WHERE ieee_address = ?", (alias,))
+
+    conn.execute(
+        """
+        INSERT INTO sensors (
+            ieee_address, friendly_name, model, zone, zone_override,
+            name_source, first_seen, last_seen
+        )
+        VALUES (?, 'Attic', ?, 'Zone 5', NULL, 'config', ?, ?)
+        ON CONFLICT(ieee_address) DO UPDATE SET
+            friendly_name = 'Attic',
+            model = excluded.model,
+            zone = 'Zone 5',
+            zone_override = CASE
+                WHEN sensors.zone_override = 'Zone 4' THEN NULL
+                ELSE sensors.zone_override
+            END,
+            name_source = 'config',
+            first_seen = excluded.first_seen,
+            last_seen = excluded.last_seen
+        """,
+        (canonical, model, first_seen, last_seen),
+    )
+    if packet_row:
+        conn.execute(
+            """
+            INSERT INTO mqtt_packet_state (ieee_address, packet_id, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            (canonical, packet_row["packet_id"], packet_row["updated_at"]),
+        )
     conn.commit()
 
 

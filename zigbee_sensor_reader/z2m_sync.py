@@ -23,6 +23,8 @@ import logging
 import os
 import sqlite3
 
+from .config import SHELLY_IDENTITY_ALIASES, SHELLY_SENSORS, ZONES
+
 logger = logging.getLogger(__name__)
 
 Z2M_MQTT_HOST = os.environ.get("Z2M_MQTT_HOST", "home-logger")
@@ -54,6 +56,14 @@ def _normalise_ieee(ieee_raw: str) -> str:
     return addr
 
 
+def _canonicalise_known_shelly(ieee: str) -> tuple[str, str | None, str | None]:
+    canonical = SHELLY_IDENTITY_ALIASES.get(ieee, ieee)
+    if not canonical.startswith("shelly:"):
+        return canonical, None, None
+    mac = canonical.split("shelly:", 1)[1].upper()
+    return canonical, SHELLY_SENSORS.get(mac), ZONES.get(mac)
+
+
 def sync_z2m_devices(devices_payload: str, conn: sqlite3.Connection) -> int:
     """
     Parse a zigbee2mqtt/bridge/devices JSON payload and upsert friendly names.
@@ -80,7 +90,9 @@ def sync_z2m_devices(devices_payload: str, conn: sqlite3.Connection) -> int:
         ieee_raw = dev.get("ieee_address") or dev.get("ieeeAddr", "")
         if not ieee_raw:
             continue
-        ieee = _normalise_ieee(ieee_raw)
+        ieee, configured_name, configured_zone = _canonicalise_known_shelly(
+            _normalise_ieee(ieee_raw)
+        )
         friendly_name = dev.get("friendly_name") or dev.get("friendlyName", "")
         # Skip devices that have no custom name (z2m uses raw IEEE as default name)
         if not friendly_name or friendly_name == ieee_raw or friendly_name == ieee:
@@ -103,12 +115,15 @@ def sync_z2m_devices(devices_payload: str, conn: sqlite3.Connection) -> int:
             upsert_sensor(
                 conn,
                 ieee_address=ieee,
-                friendly_name=friendly_name,
+                friendly_name=configured_name or friendly_name,
                 model=model or None,
-                name_source="z2m",
+                zone=configured_zone,
+                name_source="config" if configured_name else "z2m",
             )
             # If z2m has a description set, apply it as the zone override
-            if zone_from_desc:
+            if configured_name:
+                set_sensor_zone_override(conn, ieee, None)
+            elif zone_from_desc:
                 set_sensor_zone_override(conn, ieee, zone_from_desc)
             updated += 1
         except Exception as exc:

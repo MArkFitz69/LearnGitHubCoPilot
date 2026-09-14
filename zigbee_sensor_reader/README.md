@@ -36,7 +36,7 @@ Python application to monitor home temperature and humidity for heating analysis
 | **Sonoff Zigbee Dongle-M** | Zigbee coordinator (Ethernet at 192.168.1.59:6638) |
 | **Sonoff SNZB-02D / SNZB-02DR2** × 8 | Indoor temp/humidity sensors |
 | **Hive Thermostats** × 3 | Heating system control (cloud API) |
-| **Shelly Blu H&T** × 1 | Outdoor temp/humidity (BLE) |
+| **Shelly Blu H&T** × 2 | Outdoor (Zone 4) and Attic (Zone 5) temp/humidity |
 | **ESP32 + Dallas probes** | Boiler flow/return temperatures published to MQTT |
 
 ## Collection architecture
@@ -59,6 +59,7 @@ the canonical `Boiler 1 Return` sensor.
 | **Zone 2** (First floor) | Master Bedroom | Guest Bedroom, Ensuite |
 | **Zone 3** (Top floor) | Top Floor Landing | Blanca Room, Stellas Room, Games Room |
 | **Zone 4** | — | Outdoor Shelly Blu H&T |
+| **Zone 5** | — | Attic Shelly Blu H&T |
 
 ## Setup (Raspberry Pi)
 
@@ -149,6 +150,7 @@ This will scan for 30 seconds and print the MAC address. Add it to `config.py`:
 ```python
 SHELLY_SENSORS = {
     "94:B2:16:08:82:98": "Outdoor",
+    "FC:4D:6A:1D:1D:FB": "Attic",
 }
 ```
 
@@ -309,6 +311,12 @@ runtime. It covers exactly 96 local 15-minute buckets. Each bucket contains the
 latest actual reading for each probe; missing buckets stay null so the HTML
 chart renders a gap. Values are never averaged, smoothed, carried forward, or
 interpolated.
+
+The Attic sensor is also published by Zigbee2MQTT as
+`fc:4d:6a:ff:fe:1d:1d:fb`. That gateway identity is automatically consolidated
+into the physical BLE identity `shelly:FC:4D:6A:1D:1D:FB`, preserving historical
+readings while keeping one `Attic` / `Zone 5` sensor across dashboards, APIs,
+CSV, and Power BI.
 
 ## Project Structure
 

@@ -229,7 +229,11 @@ class PersistenceAndDashboardTests(unittest.TestCase):
         _migrate_outdoor_shelly(self.conn)
 
         rows = self.conn.execute(
-            "SELECT ieee_address, friendly_name, model, zone FROM sensors WHERE ieee_address LIKE 'shelly:%'"
+            """
+            SELECT ieee_address, friendly_name, model, zone
+            FROM sensors
+            WHERE ieee_address IN ('shelly:94:B2:16:08:82:98', 'shelly:esp32:outdoor_ht')
+            """
         ).fetchall()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["ieee_address"], "shelly:94:B2:16:08:82:98")
@@ -358,7 +362,7 @@ class APISurfaceTests(unittest.TestCase):
 
     def test_existing_api_export_and_dashboard_surfaces_include_esp32(self):
         sensors = self.client.get("/api/sensors").get_json()
-        self.assertEqual(sensors[0]["ieee_address"], "esp32:boiler1_out")
+        self.assertIn("esp32:boiler1_out", {row["ieee_address"] for row in sensors})
 
         readings = self.client.get("/api/readings").get_json()
         self.assertEqual(readings[0]["friendly_name"], "Boiler 1 Out")

@@ -293,7 +293,8 @@ def _get_system_info() -> dict:
 
         # Per-sensor last seen and stale flag
         sensor_status = conn.execute("""
-            SELECT s.friendly_name, s.model, COALESCE(s.zone_override, s.zone) AS zone, r.last_ts,
+            SELECT s.ieee_address, s.friendly_name, s.model,
+                   COALESCE(s.zone_override, s.zone) AS zone, r.last_ts,
                    CAST((julianday('now','localtime') - julianday(r.last_ts)) * 1440 AS INTEGER) AS mins_ago
             FROM sensors s
             LEFT JOIN (
@@ -502,6 +503,7 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
     esp32 = []
     shelly = []
     outdoor = []
+    attic = []
     hive = []
     hotwater = []
     plugs = []
@@ -580,6 +582,9 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
         elif ieee_address == "shelly:94:B2:16:08:82:98":
             sensor_row["friendly_name"] = "Outdoor"
             outdoor.append(sensor_row)
+        elif ieee_address == "shelly:FC:4D:6A:1D:1D:FB":
+            sensor_row["friendly_name"] = "Attic"
+            attic.append(sensor_row)
         elif ieee_address.startswith("shelly:") or model == "Shelly Blu H&T":
             shelly.append(sensor_row)
         else:
@@ -592,6 +597,7 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
     hotwater.sort(key=lambda row: (row.get("friendly_name") or row.get("ieee_address")))
     shelly.sort(key=lambda row: (_zone_sort_key(row.get("zone")), (row.get("friendly_name") or row.get("ieee_address") or "").lower()))
     outdoor.sort(key=lambda row: (row.get("friendly_name") or row.get("ieee_address") or "").lower())
+    attic.sort(key=lambda row: (row.get("friendly_name") or row.get("ieee_address") or "").lower())
     plugs.sort(key=lambda row: (_zone_sort_key(row.get("zone")), (row.get("friendly_name") or row.get("ieee_address") or "").lower()))
 
     return {
@@ -604,6 +610,7 @@ def _build_dashboard_snapshot(conn: sqlite3.Connection) -> dict:
         "esp32": esp32,
         "probe_chart": _build_probe_chart(conn),
         "outdoor": outdoor,
+        "attic": attic,
         "shelly": shelly,
         "hive": hive,
         "hotwater": hotwater,
@@ -1091,6 +1098,51 @@ def dashboard():
       {% endfor %}
       {% if not outdoor %}
       <tr><td colspan="10" style="color:#999">No Outdoor data yet</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+
+  <h2>Attic</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Sensor</th><th>Zone</th><th>Timestamp</th><th>Temp (&deg;C)</th><th>Humidity (%)</th>
+        <th>Battery (%)</th><th>Voltage (V)</th><th>RSSI</th>
+        <th>Today Low/High Temp (&deg;C)</th><th>Today Low/High Humidity (%)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in attic %}
+      <tr>
+        <td>{{ s.friendly_name or s.ieee_address }}</td>
+        <td class="zone-cell" id="zc-{{ s.ieee_address }}">
+          <span class="zone-val" onclick="zoneEdit('{{ s.ieee_address }}','{{ s.zone or '' }}')" title="Click to edit zone">{{ s.zone or "-" }}</span>
+          <span class="zone-edit">
+            <input type="text" placeholder="e.g. Zone 5">
+            <button onclick="zoneSave('{{ s.ieee_address }}')">&#10003;</button>
+            <button onclick="zoneCancel('{{ s.ieee_address }}')">&#10007;</button>
+          </span>
+        </td>
+        <td>{{ s.timestamp }}</td>
+        <td>{% if s.temperature_c is not none %}{{ "%.1f"|format(s.temperature_c) }}{% else %}-{% endif %}</td>
+        <td>{% if s.humidity_pct is not none %}{{ "%.1f"|format(s.humidity_pct) }}{% else %}-{% endif %}</td>
+        <td>{% if s.battery_pct is not none %}{{ "%.0f"|format(s.battery_pct) }}{% else %}-{% endif %}</td>
+        <td>{% if s.battery_voltage_mv is not none %}{{ "%.2f"|format(s.battery_voltage_mv / 1000) }}{% else %}-{% endif %}</td>
+        <td>{% if s.rssi is not none %}{{ s.rssi }}{% else %}-{% endif %}</td>
+        <td>
+          {% if s.min_temp_c is not none and s.max_temp_c is not none %}
+            {{ "%.1f"|format(s.min_temp_c) }} / {{ "%.1f"|format(s.max_temp_c) }}
+          {% else %}-{% endif %}
+        </td>
+        <td>
+          {% if s.min_humidity_pct is not none and s.max_humidity_pct is not none %}
+            {{ "%.1f"|format(s.min_humidity_pct) }} / {{ "%.1f"|format(s.max_humidity_pct) }}
+          {% else %}-{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      {% if not attic %}
+      <tr><td colspan="10" style="color:#999">No Attic data yet</td></tr>
       {% endif %}
     </tbody>
   </table>

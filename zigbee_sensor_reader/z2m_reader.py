@@ -24,6 +24,8 @@ import os
 import sqlite3
 from typing import Callable
 
+from .config import SHELLY_IDENTITY_ALIASES, SHELLY_SENSORS, ZONES
+
 logger = logging.getLogger(__name__)
 
 Z2M_MQTT_HOST = os.environ.get("Z2M_MQTT_HOST", "home-logger")
@@ -55,6 +57,15 @@ def _looks_like_ieee(value: str) -> bool:
         parts = addr.split(":")
         return len(parts) == 8 and all(len(p) == 2 for p in parts)
     return len(addr) == 16
+
+
+def _canonicalise_known_shelly(ieee: str) -> tuple[str, str | None, str | None]:
+    """Return canonical identity plus configured name/zone for known Shellys."""
+    canonical = SHELLY_IDENTITY_ALIASES.get(ieee, ieee)
+    if not canonical.startswith("shelly:"):
+        return canonical, None, None
+    mac = canonical.split("shelly:", 1)[1].upper()
+    return canonical, SHELLY_SENSORS.get(mac), ZONES.get(mac)
 
 
 class Z2MSensorReading:
@@ -197,7 +208,9 @@ class Z2MReader:
             ieee_raw = dev.get("ieee_address") or dev.get("ieeeAddr", "")
             if not ieee_raw:
                 continue
-            ieee = _normalise_ieee(ieee_raw)
+            ieee, configured_name, configured_zone = _canonicalise_known_shelly(
+                _normalise_ieee(ieee_raw)
+            )
             name = dev.get("friendly_name") or dev.get("friendlyName", "")
             # Skip devices that still use the raw IEEE as their name
             if not name or name == ieee_raw or name == ieee:
@@ -226,12 +239,15 @@ class Z2MReader:
                     upsert_sensor(
                         conn,
                         ieee_address=ieee,
-                        friendly_name=name,
+                        friendly_name=configured_name or name,
                         model=model or None,
-                        zone=_normalise_zone(zone_from_desc),
-                        name_source="z2m",
+                        zone=configured_zone or _normalise_zone(zone_from_desc),
+                        name_source="config" if configured_name else "z2m",
                     )
-                    if zone_from_desc:
+                    if configured_name:
+                        from .database import set_sensor_zone_override
+                        set_sensor_zone_override(conn, ieee, None)
+                    elif zone_from_desc:
                         from .database import set_sensor_zone_override
                         set_sensor_zone_override(conn, ieee, _normalise_zone(zone_from_desc))
                     updated += 1
@@ -269,10 +285,14 @@ class Z2MReader:
         if not ieee:
             raw_ieee = (data.get("device") or {}).get("ieee_address")
             if raw_ieee:
-                ieee = _normalise_ieee(str(raw_ieee))
+                ieee, _, _ = _canonicalise_known_shelly(
+                    _normalise_ieee(str(raw_ieee))
+                )
                 self._ieee_by_name[friendly_name] = ieee
             elif _looks_like_ieee(friendly_name):
-                ieee = _normalise_ieee(friendly_name)
+                ieee, _, _ = _canonicalise_known_shelly(
+                    _normalise_ieee(friendly_name)
+                )
             else:
                 logger.debug(
                     "z2m skipping reading for unknown device name %r until bridge/devices maps it",
@@ -289,10 +309,11 @@ class Z2MReader:
         # z2m reports Sonoff voltage in mV directly
         voltage_mv = data.get("voltage")
         zone = _normalise_zone((data.get("device") or {}).get("description"))
+        ieee, configured_name, configured_zone = _canonicalise_known_shelly(ieee)
 
         reading = Z2MSensorReading(
             ieee_address=ieee,
-            friendly_name=friendly_name,
+            friendly_name=configured_name or friendly_name,
             model=model,
             temperature_c=float(temp) if temp is not None else None,
             humidity_pct=float(humidity) if humidity is not None else None,
@@ -303,7 +324,7 @@ class Z2MReader:
             power_w=float(power) if power is not None else None,
             energy_kwh=energy_kwh,
         )
-        reading.zone = zone
+        reading.zone = configured_zone or zone
 
         logger.info(
             "z2m reading [%s]: temp=%s°C  hum=%s%%  state=%s  power=%sW  energy=%skWh  battery=%s%%",

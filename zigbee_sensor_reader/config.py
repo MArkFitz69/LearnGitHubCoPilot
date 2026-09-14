@@ -89,12 +89,21 @@ ZONES: dict[str, str] = {
     "Thermostat 6": "Zone 3",              # Top Floor Landing thermostat
     # Zone 4 - Outdoor
     "94:B2:16:08:82:98": "Zone 4",          # Outdoor (Shelly Blu H&T)
+    # Zone 5 - Attic
+    "FC:4D:6A:1D:1D:FB": "Zone 5",          # Attic (Shelly Blu H&T)
 }
 
 # Shelly Blu H&T sensors (keyed by BLE MAC address, uppercase with colons)
 # Run `python -m zigbee_sensor_reader --discover-shelly` to find MAC addresses
 SHELLY_SENSORS: dict[str, str] = {
     "94:B2:16:08:82:98": "Outdoor",
+    "FC:4D:6A:1D:1D:FB": "Attic",
+}
+
+# Known alternate identities published by other gateways. Values are the
+# canonical database identities shared with direct BLE collection.
+SHELLY_IDENTITY_ALIASES: dict[str, str] = {
+    "fc:4d:6a:ff:fe:1d:1d:fb": "shelly:FC:4D:6A:1D:1D:FB",
 }
 
 # ESP32 MQTT sensor feed. The reader uses the Zigbee2MQTT broker connection
