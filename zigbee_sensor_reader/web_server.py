@@ -1176,6 +1176,8 @@ const probeChart = {{ probe_chart|tojson }};
   const svg = document.getElementById('probeChart');
   const ns = 'http://www.w3.org/2000/svg';
   const colors = ['#d62728', '#ff7f0e', '#1f77b4', '#2ca02c'];
+  const dashStyles = ['', '9 4', '3 3', '10 3 2 3'];
+  const markerRadii = [6, 5, 4, 3];
   const allValues = probeChart.series.flatMap(s => s.values.filter(v => v !== null));
   const minValue = allValues.length ? Math.floor(Math.min(...allValues) - 1) : 0;
   const maxValue = allValues.length ? Math.ceil(Math.max(...allValues) + 1) : 40;
@@ -1200,9 +1202,10 @@ const probeChart = {{ probe_chart|tojson }};
     const label = new Date(probeChart.labels[index]).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
     add('text', {x, y: plot.top + plot.height + 20, 'text-anchor': 'middle', fill: '#555', 'font-size': '12'}, label);
   });
-  probeChart.series.forEach((series, seriesIndex) => {
+  const pointsBySeries = probeChart.series.map((series, seriesIndex) => {
     let path = '';
     let drawing = false;
+    const points = [];
     series.values.forEach((value, index) => {
       if (value === null) {
         drawing = false;
@@ -1211,13 +1214,50 @@ const probeChart = {{ probe_chart|tojson }};
       const x = plot.left + plot.width * index / 95;
       const y = plot.top + plot.height - ((value - minValue) / range) * plot.height;
       path += `${drawing ? ' L' : ' M'} ${x.toFixed(2)} ${y.toFixed(2)}`;
-      add('circle', {cx: x, cy: y, r: '2', fill: colors[seriesIndex]});
+      points.push({x, y, value, index});
       drawing = true;
     });
-    add('path', {d: path, fill: 'none', stroke: colors[seriesIndex], 'stroke-width': '2'});
+    const lineAttrs = {
+      d: path,
+      fill: 'none',
+      stroke: colors[seriesIndex],
+      'stroke-width': '2',
+    };
+    if (dashStyles[seriesIndex]) {
+      lineAttrs['stroke-dasharray'] = dashStyles[seriesIndex];
+    }
+    add('path', lineAttrs);
     const legendX = plot.left + seriesIndex * 225;
-    add('line', {x1: legendX, y1: 330, x2: legendX + 24, y2: 330, stroke: colors[seriesIndex], 'stroke-width': '3'});
+    const legendAttrs = {
+      x1: legendX,
+      y1: 330,
+      x2: legendX + 24,
+      y2: 330,
+      stroke: colors[seriesIndex],
+      'stroke-width': '3',
+    };
+    if (dashStyles[seriesIndex]) {
+      legendAttrs['stroke-dasharray'] = dashStyles[seriesIndex];
+    }
+    add('line', legendAttrs);
     add('text', {x: legendX + 30, y: 334, fill: '#333', 'font-size': '12'}, series.name);
+    return points;
+  });
+  probeChart.series.forEach((series, seriesIndex) => {
+    pointsBySeries[seriesIndex].forEach(point => {
+      const marker = add('circle', {
+        cx: point.x,
+        cy: point.y,
+        r: markerRadii[seriesIndex],
+        fill: 'none',
+        stroke: colors[seriesIndex],
+        'stroke-width': '2',
+      });
+      const title = document.createElementNS(ns, 'title');
+      const bucketTime = new Date(probeChart.labels[point.index]).toLocaleString();
+      title.textContent = `${series.name} | ${bucketTime} | ${Number(point.value).toFixed(1)} °C`;
+      marker.appendChild(title);
+    });
   });
 })();
 

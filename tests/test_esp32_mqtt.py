@@ -385,6 +385,14 @@ class APISurfaceTests(unittest.TestCase):
         self.assertIn("probeChart", dashboard_html)
         self.assertIn("Preceding 24 Hours", dashboard_html)
         self.assertIn("<h2>Outdoor</h2>", dashboard_html)
+        self.assertIn("const markerRadii = [6, 5, 4, 3]", dashboard_html)
+        self.assertIn("fill: 'none'", dashboard_html)
+        self.assertIn("document.createElementNS(ns, 'title')", dashboard_html)
+        self.assertIn("marker.appendChild(title)", dashboard_html)
+        self.assertIn("probeChart.labels[point.index]", dashboard_html)
+        self.assertIn("Number(point.value).toFixed(1)", dashboard_html)
+        self.assertIn("const dashStyles = ['', '9 4', '3 3', '10 3 2 3']", dashboard_html)
+        self.assertIn("legendAttrs['stroke-dasharray']", dashboard_html)
 
 
 if __name__ == "__main__":
