@@ -161,6 +161,7 @@ class Z2MReader:
         self._close_connections = close_connections
         self._ieee_by_name: dict[str, str] = {}  # friendly_name → ieee
         self._model_by_ieee: dict[str, str] = {}
+        self._zone_by_ieee: dict[str, str | None] = {}
 
     def handle_message(self, topic: str, payload: str) -> None:
         """Dispatch an incoming MQTT message."""
@@ -218,9 +219,10 @@ class Z2MReader:
                 or dev.get("modelID")
                 or dev.get("model_id")
             )
-            zone_from_desc = dev.get("description") or None
+            zone_from_desc = _normalise_zone(dev.get("description"))
 
             self._ieee_by_name[name] = ieee
+            self._zone_by_ieee[ieee] = configured_zone or zone_from_desc
             if model:
                 self._model_by_ieee[ieee] = model
 
@@ -242,7 +244,7 @@ class Z2MReader:
                             zone=configured_zone or ZONES.get(ieee),
                             zone_override=(
                                 None if configured_name
-                                else _normalise_zone(zone_from_desc)
+                                else zone_from_desc
                             ),
                             name_source="config" if configured_name else "z2m",
                         )
@@ -307,8 +309,13 @@ class Z2MReader:
         lqi = link_quality
         # z2m reports Sonoff voltage in mV directly
         voltage_mv = data.get("voltage")
-        zone = _normalise_zone((data.get("device") or {}).get("description"))
         ieee, configured_name, configured_zone = _canonicalise_known_shelly(ieee)
+        device = data.get("device") or {}
+        if "description" in device:
+            state_zone = _normalise_zone(device.get("description"))
+            self._zone_by_ieee[ieee] = configured_zone or state_zone
+        else:
+            state_zone = self._zone_by_ieee.get(ieee)
 
         reading = Z2MSensorReading(
             ieee_address=ieee,
@@ -323,7 +330,7 @@ class Z2MReader:
             power_w=float(power) if power is not None else None,
             energy_kwh=energy_kwh,
         )
-        reading.zone = configured_zone or zone
+        reading.zone = configured_zone or state_zone
 
         logger.info(
             "z2m reading [%s]: temp=%s°C  hum=%s%%  state=%s  power=%sW  energy=%skWh  battery=%s%%",

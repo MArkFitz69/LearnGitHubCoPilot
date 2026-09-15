@@ -66,6 +66,7 @@ def handle_reading(reading, conn=None) -> bool:
             ),
             zone_override=(
                 getattr(reading, "zone", None)
+                or (existing["zone_override"] if existing else None)
                 if source == "z2m"
                 else None
             ),

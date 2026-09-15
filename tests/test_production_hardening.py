@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -11,7 +12,7 @@ import unittest
 from unittest import mock
 
 from zigbee_sensor_reader import database, export, hive_reader, web_server
-from zigbee_sensor_reader.__main__ import main
+from zigbee_sensor_reader.__main__ import handle_reading, main
 from zigbee_sensor_reader.database import get_connection, insert_reading, upsert_sensor
 from zigbee_sensor_reader.mqtt_config import MQTTSettings
 from zigbee_sensor_reader.web_server import _calculate_hive_runtime_seconds, app
@@ -357,6 +358,145 @@ class ReadOnlySurfaceTests(unittest.TestCase):
             main()
         self.assertIn("Hall: 20.0°C", output.getvalue())
         self.assertIn("Water: ON", output.getvalue())
+
+
+class Z2MZonePersistenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.temp_dir.name, "sensor_data.db")
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.row_factory = sqlite3.Row
+        database._create_tables(self.conn)
+        self.original_web_path = web_server.DATABASE_PATH
+        self.original_export_path = export.DATABASE_PATH
+        web_server.DATABASE_PATH = self.db_path
+        export.DATABASE_PATH = self.db_path
+        self.client = app.test_client()
+        self.reader = Z2MReader(
+            on_reading=lambda reading: handle_reading(reading, self.conn),
+            get_conn_fn=lambda: self.conn,
+        )
+
+    def tearDown(self):
+        self.conn.close()
+        web_server.DATABASE_PATH = self.original_web_path
+        export.DATABASE_PATH = self.original_export_path
+        self.temp_dir.cleanup()
+
+    @staticmethod
+    def _devices(sensor_zone="Cinema Room", plug_zone="Kitchen"):
+        return [
+            {
+                "ieee_address": "0x00124b0025e7a1c3",
+                "friendly_name": "Cinema Sensor",
+                "description": sensor_zone,
+                "definition": {"model": "SNZB-02D"},
+            },
+            {
+                "ieee_address": "0x00124b0025e7a1c4",
+                "friendly_name": "Hive Plug",
+                "description": plug_zone,
+                "definition": {"model": "TS011F"},
+            },
+        ]
+
+    def _publish_states_without_descriptions(self):
+        self.reader.handle_message(
+            "zigbee2mqtt/Cinema Sensor",
+            '{"temperature":20.5,"humidity":51,"battery":89}',
+        )
+        self.reader.handle_message(
+            "zigbee2mqtt/Hive Plug",
+            '{"state":"ON","power":42.5,"energy":1234.5}',
+        )
+
+    def test_bridge_zones_survive_state_messages_and_all_surfaces(self):
+        self.reader.handle_message(
+            "zigbee2mqtt/bridge/devices",
+            json.dumps(self._devices()),
+        )
+        self._publish_states_without_descriptions()
+
+        zones = {
+            row["friendly_name"]: row["zone_override"]
+            for row in self.conn.execute(
+                "SELECT friendly_name, zone_override FROM sensors"
+            )
+            if row["friendly_name"] in {"Cinema Sensor", "Hive Plug"}
+        }
+        self.assertEqual(
+            zones,
+            {"Cinema Sensor": "Cinema Room", "Hive Plug": "Kitchen"},
+        )
+
+        dashboard = self.client.get("/api/dashboard").get_json()
+        self.assertEqual(dashboard["sonoff"][0]["zone"], "Cinema Room")
+        self.assertEqual(dashboard["plugs"][0]["zone"], "Kitchen")
+
+        sensors = {
+            row["friendly_name"]: row["zone"]
+            for row in self.client.get("/api/sensors").get_json()
+        }
+        self.assertEqual(sensors["Cinema Sensor"], "Cinema Room")
+        self.assertEqual(sensors["Hive Plug"], "Kitchen")
+
+        readings = {
+            row["friendly_name"]: row["zone"]
+            for row in self.client.get("/api/readings/latest").get_json()
+        }
+        self.assertEqual(readings["Cinema Sensor"], "Cinema Room")
+        self.assertEqual(readings["Hive Plug"], "Kitchen")
+        history_zones = {
+            row["friendly_name"]: row["zone"]
+            for row in self.client.get("/api/readings").get_json()
+        }
+        self.assertEqual(history_zones["Cinema Sensor"], "Cinema Room")
+        self.assertEqual(history_zones["Hive Plug"], "Kitchen")
+        health = {
+            row["friendly_name"]: row["zone"]
+            for row in self.client.get("/api/system").get_json()["sensor_status"]
+        }
+        self.assertEqual(health["Cinema Sensor"], "Cinema Room")
+        self.assertEqual(health["Hive Plug"], "Kitchen")
+        csv_payload = self.client.get("/api/export/csv").get_data(as_text=True)
+        self.assertIn("Cinema Room", csv_payload)
+        self.assertIn("Kitchen", csv_payload)
+
+    def test_explicit_bridge_description_clear_removes_cached_zone(self):
+        self.reader.handle_message(
+            "zigbee2mqtt/bridge/devices",
+            json.dumps(self._devices()),
+        )
+        self._publish_states_without_descriptions()
+        self.reader.handle_message(
+            "zigbee2mqtt/bridge/devices",
+            json.dumps(self._devices(sensor_zone="", plug_zone="")),
+        )
+        self._publish_states_without_descriptions()
+
+        zones = self.conn.execute(
+            """
+            SELECT friendly_name, zone_override FROM sensors
+            WHERE friendly_name IN ('Cinema Sensor', 'Hive Plug')
+            """
+        ).fetchall()
+        self.assertEqual({row["zone_override"] for row in zones}, {None})
+
+        dashboard = self.client.get("/api/dashboard").get_json()
+        self.assertIsNone(dashboard["sonoff"][0]["zone"])
+        self.assertIsNone(dashboard["plugs"][0]["zone"])
+        latest = {
+            row["friendly_name"]: row["zone"]
+            for row in self.client.get("/api/readings/latest").get_json()
+        }
+        self.assertIsNone(latest["Cinema Sensor"])
+        self.assertIsNone(latest["Hive Plug"])
+        sensors = {
+            row["friendly_name"]: row["zone"]
+            for row in self.client.get("/api/sensors").get_json()
+        }
+        self.assertIsNone(sensors["Cinema Sensor"])
+        self.assertIsNone(sensors["Hive Plug"])
 
 
 if __name__ == "__main__":

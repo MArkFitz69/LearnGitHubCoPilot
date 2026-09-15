@@ -152,7 +152,9 @@ the website does not mutate configuration or database metadata. All APIs,
 dashboard queries, CSV exports, and Power BI feeds expose the same effective
 zone precedence: Zigbee2MQTT description, configured sensor zone, then the
 historical reading zone. Configured canonical Outdoor/Attic zones remain
-authoritative.
+authoritative. Zigbee2MQTT descriptions are cached across ordinary state
+messages that omit device metadata; clearing a description in Zigbee2MQTT
+clears the derived zone on the next bridge device-list update.
 
 The boiler chart uses exactly 96 local 15-minute buckets. Each sensor/bucket
 contains only the latest actual reading; gaps remain null. Values are never
