@@ -14,7 +14,12 @@ from .config import (
     SHELLY_SENSORS,
     ZONES,
 )
-from .database import get_connection, insert_reading, upsert_sensor
+from .database import (
+    get_connection,
+    insert_reading,
+    record_mqtt_device_activity,
+    upsert_sensor,
+)
 from .export import export_to_csv, export_to_excel, get_sensor_summary
 
 logging.basicConfig(
@@ -134,6 +139,23 @@ def handle_reading(reading, conn=None) -> bool:
             conn.close()
 
 
+def handle_esp32_activity(activity) -> None:
+    """Persist ESP32 MQTT health using a callback-thread-owned connection."""
+    conn = get_connection()
+    try:
+        record_mqtt_device_activity(
+            conn,
+            device_key=activity.device_key,
+            topic_prefix=activity.topic_prefix,
+            topic=activity.topic,
+            retained=activity.retained,
+            reported_status=activity.reported_status,
+            is_sensor_publication=activity.is_sensor_publication,
+        )
+    finally:
+        conn.close()
+
+
 async def run_collector() -> None:
     """Run independent MQTT callbacks alongside periodic Hive/BLE polling."""
     conn = get_connection()
@@ -181,7 +203,12 @@ async def run_collector() -> None:
                 get_conn_fn=get_connection,
             )
         ),
-        asyncio.create_task(run_esp32_mqtt_reader(on_reading=handle_reading)),
+        asyncio.create_task(
+            run_esp32_mqtt_reader(
+                on_reading=handle_reading,
+                on_activity=handle_esp32_activity,
+            )
+        ),
     ]
     logger.info("Zigbee2MQTT and ESP32 MQTT readers started")
 

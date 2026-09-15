@@ -78,6 +78,17 @@ export ESP32_TOPIC_PREFIX=heating-esp
 The ESP32 client inherits every Z2M broker setting unless the corresponding
 `ESP32_MQTT_*` variable is set.
 
+The existing ESP32 subscription also records device-level MQTT health. A
+non-retained recognized sensor publication or non-retained `online` status
+confirms live communication even when the sensor payload is malformed; malformed
+payloads still never create readings. Retained `online` replays do not refresh
+liveness, while explicit `offline` status is immediate. Health becomes stale
+after 30 minutes by default:
+
+```bash
+export ESP32_MQTT_STALE_MINUTES=30
+```
+
 ### MQTT production hardening
 
 Use a dedicated Mosquitto account restricted by ACL to read
@@ -146,6 +157,10 @@ python -m zigbee_sensor_reader --export xlsx
 | `/api/readings` | Filterable readings; add `format=csv` for Power BI |
 | `/api/readings/latest` | Exactly one latest row per sensor |
 | `/api/export/csv` | Download all matching readings |
+
+`/api/system` includes structured `esp32_mqtt_health` entries. `/system`
+renders the same state, last confirmed communication, age, last MQTT status,
+retained-status indicator, and last live topic after the Services table.
 
 Zones are configured in `config.py` or derived from Zigbee2MQTT descriptions;
 the website does not mutate configuration or database metadata. All APIs,

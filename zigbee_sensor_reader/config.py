@@ -101,6 +101,10 @@ SHELLY_SOURCE_FALLBACK_SECONDS = int(
 ESP32_TOPIC_PREFIX = (
     os.environ.get("ESP32_TOPIC_PREFIX", "heating-esp").strip("/") or "heating-esp"
 )
+ESP32_MQTT_STALE_MINUTES = max(
+    1,
+    int(os.environ.get("ESP32_MQTT_STALE_MINUTES", "30")),
+)
 
 # Canonical sensor keys and visible names. The firmware topic typo
 # "bolier_1_return" is mapped to the canonical "boiler1_return" identity by the

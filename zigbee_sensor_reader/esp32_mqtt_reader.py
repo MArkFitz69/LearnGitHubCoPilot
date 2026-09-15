@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import re
+from dataclasses import dataclass
 from typing import Callable
 
 from .config import ESP32_SENSOR_NAMES, ESP32_SENSOR_ZONES, ESP32_TOPIC_PREFIX
@@ -74,6 +75,21 @@ class ESP32SensorReading:
 ReadingCallback = Callable[[ESP32SensorReading], object]
 
 
+@dataclass(frozen=True)
+class ESP32MQTTActivity:
+    """Recognized MQTT activity emitted before payload validation."""
+
+    device_key: str
+    topic_prefix: str
+    topic: str
+    retained: bool
+    reported_status: str | None = None
+    is_sensor_publication: bool = False
+
+
+ActivityCallback = Callable[[ESP32MQTTActivity], object]
+
+
 def parse_numeric_temperature(payload: str) -> float:
     """Parse a finite Celsius value from an MQTT text payload."""
     text = payload.strip()
@@ -110,9 +126,11 @@ class ESP32MQTTReader:
     def __init__(
         self,
         on_reading: ReadingCallback | None = None,
+        on_activity: ActivityCallback | None = None,
         topic_prefix: str = ESP32_TOPIC_PREFIX,
     ):
         self._on_reading = on_reading
+        self._on_activity = on_activity
         self.topic_prefix = topic_prefix.strip("/") or "heating-esp"
         self._last_packet_ids: dict[str, int] = {}
 
@@ -130,10 +148,45 @@ class ESP32MQTTReader:
             f"{root}/shelly_raw_payload/state",
         ]
 
-    def handle_message(self, topic: str, payload: str) -> None:
+    def _emit_activity(
+        self,
+        topic: str,
+        retained: bool,
+        reported_status: str | None = None,
+        is_sensor_publication: bool = False,
+    ) -> None:
+        if self._on_activity:
+            try:
+                self._on_activity(
+                    ESP32MQTTActivity(
+                        device_key=f"esp32:{self.topic_prefix}",
+                        topic_prefix=self.topic_prefix,
+                        topic=topic,
+                        retained=retained,
+                        reported_status=reported_status,
+                        is_sensor_publication=is_sensor_publication,
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to persist ESP32 MQTT activity for %s",
+                    topic,
+                )
+
+    def handle_message(
+        self,
+        topic: str,
+        payload: str,
+        retained: bool = False,
+    ) -> None:
         """Dispatch status and known sensor state topics; ignore everything else."""
         if topic == f"{self.topic_prefix}/status":
             status = payload.strip().lower()
+            self._emit_activity(
+                topic,
+                retained=retained,
+                reported_status=status if status in {"online", "offline"} else None,
+            )
             if status in {"online", "offline"}:
                 logger.info("ESP32 %s is %s", self.topic_prefix, status)
             else:
@@ -148,6 +201,11 @@ class ESP32MQTTReader:
         sensor_key = TOPIC_KEY_ALIASES.get(topic_key)
         if sensor_key is None:
             return
+        self._emit_activity(
+            topic,
+            retained=retained,
+            is_sensor_publication=True,
+        )
 
         if sensor_key == "outdoorh_t_json":
             self._handle_shelly_json_payload(topic, payload)
@@ -230,6 +288,7 @@ class ESP32MQTTReader:
 
 async def run_esp32_mqtt_reader(
     on_reading: ReadingCallback | None = None,
+    on_activity: ActivityCallback | None = None,
     topic_prefix: str = ESP32_TOPIC_PREFIX,
 ) -> None:
     """Long-running ESP32 MQTT task with the same reconnect pattern as Z2M."""
@@ -242,7 +301,11 @@ async def run_esp32_mqtt_reader(
         )
         return
 
-    reader = ESP32MQTTReader(on_reading=on_reading, topic_prefix=topic_prefix)
+    reader = ESP32MQTTReader(
+        on_reading=on_reading,
+        on_activity=on_activity,
+        topic_prefix=topic_prefix,
+    )
 
     def on_connect(client, userdata, flags, rc):
         if rc == 0:
@@ -266,7 +329,11 @@ async def run_esp32_mqtt_reader(
 
     def on_message(client, userdata, msg):
         try:
-            reader.handle_message(msg.topic, msg.payload.decode("utf-8", errors="replace"))
+            reader.handle_message(
+                msg.topic,
+                msg.payload.decode("utf-8", errors="replace"),
+                retained=bool(msg.retain),
+            )
         except Exception as exc:
             logger.warning("ESP32 MQTT message handler error: %s", exc)
 

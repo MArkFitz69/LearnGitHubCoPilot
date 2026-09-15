@@ -162,6 +162,69 @@ class ESP32ReaderTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     normalise_mac(value)
 
+    def test_recognized_activity_precedes_validation_and_ignores_other_topics(self):
+        events = []
+        reader = ESP32MQTTReader(
+            on_activity=lambda activity: events.append(
+                (
+                    "activity",
+                    activity.topic,
+                    activity.retained,
+                    activity.reported_status,
+                    activity.is_sensor_publication,
+                )
+            ),
+            on_reading=lambda reading: events.append(
+                ("reading", reading.ieee_address)
+            ),
+            topic_prefix="heating-esp",
+        )
+
+        reader.handle_message(
+            "heating-esp/sensor/boiler1_out/state",
+            "bad",
+            retained=False,
+        )
+        self.assertEqual(
+            events,
+            [
+                (
+                    "activity",
+                    "heating-esp/sensor/boiler1_out/state",
+                    False,
+                    None,
+                    True,
+                )
+            ],
+        )
+
+        reader.handle_message(
+            "heating-esp/sensor/boiler1_out/state",
+            "21.5",
+            retained=True,
+        )
+        self.assertEqual(events[-2][0], "activity")
+        self.assertEqual(events[-2][2], True)
+        self.assertEqual(events[-1], ("reading", "esp32:boiler1_out"))
+
+        reader.handle_message(
+            "heating-esp/status",
+            "offline",
+            retained=True,
+        )
+        self.assertEqual(
+            events[-1],
+            ("activity", "heating-esp/status", True, "offline", False),
+        )
+        count = len(events)
+        reader.handle_message("heating-esp/debug", "anything", retained=False)
+        reader.handle_message(
+            "heating-esp/sensor/unknown/state",
+            "20",
+            retained=False,
+        )
+        self.assertEqual(len(events), count)
+
 
 class PersistenceAndDashboardTests(unittest.TestCase):
     def setUp(self):

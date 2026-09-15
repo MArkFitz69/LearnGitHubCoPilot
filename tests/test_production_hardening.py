@@ -10,12 +10,22 @@ import tempfile
 import threading
 import unittest
 from unittest import mock
+from datetime import datetime, timedelta
 
 from zigbee_sensor_reader import database, export, hive_reader, web_server
 from zigbee_sensor_reader.__main__ import handle_reading, main
-from zigbee_sensor_reader.database import get_connection, insert_reading, upsert_sensor
+from zigbee_sensor_reader.database import (
+    get_connection,
+    insert_reading,
+    record_mqtt_device_activity,
+    upsert_sensor,
+)
 from zigbee_sensor_reader.mqtt_config import MQTTSettings
-from zigbee_sensor_reader.web_server import _calculate_hive_runtime_seconds, app
+from zigbee_sensor_reader.web_server import (
+    _calculate_hive_runtime_seconds,
+    _get_mqtt_device_health,
+    app,
+)
 from zigbee_sensor_reader.z2m_reader import Z2MReader, _extract_energy_kwh
 
 
@@ -101,6 +111,14 @@ class MigrationAndConcurrencyTests(unittest.TestCase):
         )
         self.assertEqual(
             first.execute("SELECT COUNT(*) FROM readings").fetchone()[0], 1
+        )
+        self.assertIsNotNone(
+            first.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type='table' AND name='mqtt_device_health'
+                """
+            ).fetchone()
         )
         self.assertEqual(
             first.execute("SELECT reading_date FROM readings").fetchone()[0],
@@ -253,6 +271,196 @@ class PacketAndMQTTTests(unittest.TestCase):
     def test_energy_values_are_not_scaled_by_magnitude(self):
         self.assertEqual(_extract_energy_kwh({"energy": 1234.5}), 1234.5)
         self.assertEqual(_extract_energy_kwh({"energy_kwh": 2001}), 2001.0)
+
+
+class ESP32MQTTHealthTests(unittest.TestCase):
+    DEVICE_KEY = "esp32:heating-esp"
+    PREFIX = "heating-esp"
+    STATUS_TOPIC = "heating-esp/status"
+    SENSOR_TOPIC = "heating-esp/sensor/boiler1_out/state"
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.temp_dir.name, "sensor_data.db")
+        self.original_db_path = database.DATABASE_PATH
+        self.original_web_path = web_server.DATABASE_PATH
+        database.DATABASE_PATH = self.db_path
+        web_server.DATABASE_PATH = self.db_path
+        get_connection().close()
+        self.client = app.test_client()
+
+    def tearDown(self):
+        database.DATABASE_PATH = self.original_db_path
+        web_server.DATABASE_PATH = self.original_web_path
+        self.temp_dir.cleanup()
+
+    def _record(
+        self,
+        timestamp,
+        *,
+        topic=None,
+        retained=False,
+        status=None,
+        sensor=False,
+    ):
+        conn = get_connection()
+        try:
+            record_mqtt_device_activity(
+                conn,
+                device_key=self.DEVICE_KEY,
+                topic_prefix=self.PREFIX,
+                topic=topic or self.STATUS_TOPIC,
+                retained=retained,
+                reported_status=status,
+                is_sensor_publication=sensor,
+                observed_at=timestamp,
+            )
+        finally:
+            conn.close()
+
+    def _health(self, now):
+        conn = get_connection()
+        try:
+            return _get_mqtt_device_health(conn, now=now)[0]
+        finally:
+            conn.close()
+
+    def test_retained_and_live_transition_semantics_persist_across_restart(self):
+        start = datetime(2026, 9, 15, 9, 0)
+        self._record(start.isoformat(), retained=True, status="online")
+        health = self._health(start)
+        self.assertEqual(health["state"], "unknown")
+        self.assertIsNone(health["last_communication_at"])
+        self.assertEqual(health["reported_status"], "online")
+        self.assertTrue(health["status_retained"])
+
+        live = start + timedelta(minutes=1)
+        self._record(
+            live.isoformat(),
+            topic=self.SENSOR_TOPIC,
+            sensor=True,
+        )
+        health = self._health(live)
+        self.assertEqual(health["state"], "online")
+        self.assertEqual(health["last_live_topic"], self.SENSOR_TOPIC)
+
+        offline = start + timedelta(minutes=2)
+        self._record(
+            offline.isoformat(),
+            retained=True,
+            status="offline",
+        )
+        self.assertEqual(self._health(offline)["state"], "offline")
+
+        retained_sensor = start + timedelta(minutes=3)
+        self._record(
+            retained_sensor.isoformat(),
+            topic=self.SENSOR_TOPIC,
+            retained=True,
+            sensor=True,
+        )
+        health = self._health(retained_sensor)
+        self.assertEqual(health["state"], "offline")
+        self.assertEqual(health["last_communication_at"], live.isoformat())
+
+        retained_online = start + timedelta(minutes=3, seconds=30)
+        self._record(
+            retained_online.isoformat(),
+            retained=True,
+            status="online",
+        )
+        health = self._health(retained_online)
+        self.assertEqual(health["reported_status"], "online")
+        self.assertTrue(health["status_retained"])
+        self.assertEqual(health["state"], "offline")
+
+        restored = start + timedelta(minutes=4)
+        self._record(
+            restored.isoformat(),
+            topic=self.SENSOR_TOPIC,
+            sensor=True,
+        )
+        health = self._health(restored)
+        self.assertEqual(health["state"], "online")
+        self.assertEqual(health["last_communication_at"], restored.isoformat())
+
+        conn = get_connection()
+        persisted = conn.execute(
+            "SELECT * FROM mqtt_device_health WHERE device_key=?",
+            (self.DEVICE_KEY,),
+        ).fetchone()
+        conn.close()
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted["last_live_topic"], self.SENSOR_TOPIC)
+
+    def test_non_retained_online_is_live_and_stale_threshold_is_applied(self):
+        start = datetime(2026, 9, 15, 9, 0)
+        self._record(start.isoformat(), status="online")
+        self.assertEqual(self._health(start + timedelta(minutes=30))["state"], "online")
+        stale = self._health(start + timedelta(minutes=31))
+        self.assertEqual(stale["state"], "stale")
+        self.assertEqual(stale["age_minutes"], 31)
+        self.assertEqual(stale["stale_after_minutes"], 30)
+
+    def test_malformed_sensor_publish_updates_health_without_reading(self):
+        from zigbee_sensor_reader.esp32_mqtt_reader import ESP32MQTTReader
+
+        def persist(activity):
+            self._record(
+                datetime.now().isoformat(timespec="microseconds"),
+                topic=activity.topic,
+                retained=activity.retained,
+                status=activity.reported_status,
+                sensor=activity.is_sensor_publication,
+            )
+
+        reader = ESP32MQTTReader(
+            on_activity=persist,
+            topic_prefix=self.PREFIX,
+        )
+        reader.handle_message(self.SENSOR_TOPIC, "not-a-number", retained=False)
+
+        conn = get_connection()
+        try:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0],
+                0,
+            )
+            health = _get_mqtt_device_health(conn)[0]
+        finally:
+            conn.close()
+        self.assertEqual(health["state"], "online")
+        self.assertEqual(health["last_live_topic"], self.SENSOR_TOPIC)
+
+    def test_system_api_and_html_include_structured_health(self):
+        now = datetime.now().replace(microsecond=0)
+        self._record(
+            now.isoformat(),
+            topic=self.SENSOR_TOPIC,
+            sensor=True,
+        )
+        system = self.client.get("/api/system").get_json()
+        self.assertEqual(len(system["esp32_mqtt_health"]), 1)
+        health = system["esp32_mqtt_health"][0]
+        self.assertEqual(health["device_key"], self.DEVICE_KEY)
+        self.assertEqual(health["device"], self.PREFIX)
+        self.assertEqual(health["state"], "online")
+        self.assertEqual(health["last_live_topic"], self.SENSOR_TOPIC)
+
+        html = self.client.get("/system").get_data(as_text=True)
+        self.assertIn("<h2>ESP32 MQTT Health</h2>", html)
+        self.assertIn("Last communication", html)
+        self.assertIn(self.PREFIX, html)
+        self.assertIn(self.SENSOR_TOPIC, html)
+
+    def test_paho_callback_forwards_retain_flag(self):
+        source = Path(
+            __import__(
+                "zigbee_sensor_reader.esp32_mqtt_reader",
+                fromlist=["dummy"],
+            ).__file__
+        ).read_text(encoding="utf-8")
+        self.assertIn("retained=bool(msg.retain)", source)
 
 
 class ReadOnlySurfaceTests(unittest.TestCase):

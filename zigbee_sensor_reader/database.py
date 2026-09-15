@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .config import DATABASE_PATH, SHELLY_SOURCE_FALLBACK_SECONDS
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def get_connection() -> sqlite3.Connection:
@@ -109,6 +109,21 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             _migrate_outdoor_shelly(conn)
         if version < 3:
             _migrate_attic_shelly(conn)
+        if version < 5:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mqtt_device_health (
+                    device_key TEXT PRIMARY KEY,
+                    topic_prefix TEXT NOT NULL,
+                    reported_status TEXT,
+                    status_retained INTEGER,
+                    status_observed_at TEXT,
+                    last_communication_at TEXT,
+                    last_live_topic TEXT,
+                    last_offline_at TEXT
+                )
+                """
+            )
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         conn.commit()
     except Exception:
@@ -418,6 +433,75 @@ def set_sensor_zone_override(
     conn.execute(
         "UPDATE sensors SET zone_override=? WHERE ieee_address=?",
         (zone_override, ieee_address),
+    )
+    conn.commit()
+
+
+def record_mqtt_device_activity(
+    conn: sqlite3.Connection,
+    device_key: str,
+    topic_prefix: str,
+    topic: str,
+    retained: bool,
+    reported_status: str | None = None,
+    is_sensor_publication: bool = False,
+    observed_at: str | None = None,
+) -> None:
+    """Persist an MQTT status/activity event without creating a sensor reading."""
+    now = observed_at or datetime.now().isoformat(timespec="microseconds")
+    normalized_status = (
+        reported_status
+        if reported_status in {"online", "offline"}
+        else None
+    )
+    confirms_live = (
+        not retained
+        and (is_sensor_publication or normalized_status == "online")
+    )
+    conn.execute(
+        """
+        INSERT INTO mqtt_device_health (
+            device_key, topic_prefix, reported_status, status_retained,
+            status_observed_at, last_communication_at, last_live_topic,
+            last_offline_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(device_key) DO UPDATE SET
+            topic_prefix=excluded.topic_prefix,
+            reported_status=CASE
+                WHEN excluded.reported_status IS NOT NULL
+                    THEN excluded.reported_status
+                ELSE mqtt_device_health.reported_status END,
+            status_retained=CASE
+                WHEN excluded.reported_status IS NOT NULL
+                    THEN excluded.status_retained
+                ELSE mqtt_device_health.status_retained END,
+            status_observed_at=CASE
+                WHEN excluded.reported_status IS NOT NULL
+                    THEN excluded.status_observed_at
+                ELSE mqtt_device_health.status_observed_at END,
+            last_communication_at=CASE
+                WHEN excluded.last_communication_at IS NOT NULL
+                    THEN excluded.last_communication_at
+                ELSE mqtt_device_health.last_communication_at END,
+            last_live_topic=CASE
+                WHEN excluded.last_communication_at IS NOT NULL
+                    THEN excluded.last_live_topic
+                ELSE mqtt_device_health.last_live_topic END,
+            last_offline_at=COALESCE(
+                excluded.last_offline_at,
+                mqtt_device_health.last_offline_at
+            )
+        """,
+        (
+            device_key,
+            topic_prefix,
+            normalized_status,
+            int(retained) if normalized_status is not None else None,
+            now if normalized_status is not None else None,
+            now if confirms_live else None,
+            topic if confirms_live else None,
+            now if normalized_status == "offline" else None,
+        ),
     )
     conn.commit()
 

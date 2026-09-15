@@ -25,6 +25,7 @@ Environment=Z2M_MQTT_TRANSPORT=websockets
 # Environment=Z2M_MQTT_CLIENT_KEY=/etc/zigbee-sensor-reader/client.key
 # ESP32 feed uses the Z2M broker values by default.
 Environment=ESP32_TOPIC_PREFIX=heating-esp
+Environment=ESP32_MQTT_STALE_MINUTES=30
 Environment="ESP32_ZONE_SHELLY=Zone 4"
 # Optional independent broker overrides:
 # Environment=ESP32_MQTT_HOST=home-logger

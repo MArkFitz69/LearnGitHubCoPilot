@@ -35,7 +35,13 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template_string, request
 
-from .config import DATABASE_PATH, ESP32_SENSOR_NAMES, POLLING_INTERVAL, SHELLY_SENSORS
+from .config import (
+    DATABASE_PATH,
+    ESP32_MQTT_STALE_MINUTES,
+    ESP32_SENSOR_NAMES,
+    POLLING_INTERVAL,
+    SHELLY_SENSORS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +127,75 @@ def _get_reading_type_counts(conn: sqlite3.Connection) -> dict:
         FROM readings
     """).fetchone()
     return dict(row)
+
+
+def _get_mqtt_device_health(
+    conn: sqlite3.Connection,
+    now: datetime | None = None,
+) -> list[dict]:
+    """Return derived ESP32 MQTT health from persisted status/activity events."""
+    try:
+        rows = conn.execute(
+            """
+            SELECT device_key, topic_prefix, reported_status, status_retained,
+                   status_observed_at, last_communication_at, last_live_topic,
+                   last_offline_at
+            FROM mqtt_device_health
+            WHERE device_key LIKE 'esp32:%'
+            ORDER BY device_key
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+    current = now or datetime.now()
+    health = []
+    for row in rows:
+        item = dict(row)
+        last_communication = item["last_communication_at"]
+        age_minutes = None
+        if last_communication:
+            age_minutes = max(
+                int(
+                    (
+                        current - _parse_iso_timestamp(last_communication)
+                    ).total_seconds()
+                    // 60
+                ),
+                0,
+            )
+
+        offline_is_newest = (
+            item["last_offline_at"] is not None
+            and (
+                last_communication is None
+                or item["last_offline_at"] >= last_communication
+            )
+        )
+        if offline_is_newest:
+            state = "offline"
+        elif last_communication is None:
+            state = "unknown"
+        elif age_minutes > ESP32_MQTT_STALE_MINUTES:
+            state = "stale"
+        else:
+            state = "online"
+
+        item.update(
+            {
+                "device": item["topic_prefix"],
+                "state": state,
+                "age_minutes": age_minutes,
+                "stale_after_minutes": ESP32_MQTT_STALE_MINUTES,
+                "status_retained": (
+                    bool(item["status_retained"])
+                    if item["status_retained"] is not None
+                    else None
+                ),
+            }
+        )
+        health.append(item)
+    return health
 
 
 def _get_system_info() -> dict:
@@ -239,6 +314,7 @@ def _get_system_info() -> dict:
         info["db_last_reading"] = ts_range["last"]
 
         info["db_counts"] = _get_reading_type_counts(conn)
+        info["esp32_mqtt_health"] = _get_mqtt_device_health(conn)
 
         # Per-sensor last seen and stale flag
         sensor_status = conn.execute("""
@@ -711,6 +787,29 @@ def system_page():
   </tbody>
 </table>
 
+<h2>ESP32 MQTT Health</h2>
+<table>
+  <thead><tr><th>Device</th><th>State</th><th>Last communication</th><th>Age</th><th>Last MQTT status</th><th>Last topic</th></tr></thead>
+  <tbody>
+  {% for device in esp32_mqtt_health %}
+  <tr class="{{ 'down' if device.state == 'offline' else ('stale' if device.state == 'stale' else '') }}">
+    <td>{{ device.device }}</td>
+    <td class="{{ 'ok' if device.state == 'online' else ('warn' if device.state in ('stale', 'unknown') else 'err') }}">{{ device.state }}</td>
+    <td>{{ device.last_communication_at or "never" }}</td>
+    <td>{% if device.age_minutes is none %}-{% elif device.age_minutes < 60 %}{{ device.age_minutes }}m{% elif device.age_minutes < 1440 %}{{ device.age_minutes // 60 }}h {{ device.age_minutes % 60 }}m{% else %}{{ device.age_minutes // 1440 }}d {{ (device.age_minutes % 1440) // 60 }}h{% endif %}</td>
+    <td>
+      {{ device.reported_status or "-" }}
+      {% if device.status_retained is sameas true %}(retained){% endif %}
+    </td>
+    <td><code>{{ device.last_live_topic or "-" }}</code></td>
+  </tr>
+  {% endfor %}
+  {% if not esp32_mqtt_health %}
+  <tr><td colspan="6" style="color:#999">No ESP32 MQTT activity recorded yet</td></tr>
+  {% endif %}
+  </tbody>
+</table>
+
 <h2>&#128190; Database</h2>
 <div class="grid">
   <div class="card"><h3>File Size</h3><div class="val">{{ db_size }} MB</div></div>
@@ -776,6 +875,7 @@ def system_page():
         disk_txt=txt_cls(info.get("disk_pct")),
         disk_bar=bar_cls(info.get("disk_pct")),
         services=info.get("services", {}),
+        esp32_mqtt_health=info.get("esp32_mqtt_health", []),
         db_size=info.get("db_size_mb", "?"),
         db_total=fmt(info.get("db_total_readings")),
         db_today=fmt(info.get("db_today_readings")),
