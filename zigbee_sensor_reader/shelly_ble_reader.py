@@ -251,10 +251,11 @@ async def poll_shelly_ble(scan_duration: float = 60.0) -> list[dict]:
             authoritative_source=SHELLY_AUTHORITATIVE_SOURCES.get(mac),
         )
         if not was_stored:
-            logger.debug(
-                "Skipping duplicate Shelly packet %s for %s",
+            logger.info(
+                "Skipped Shelly BLE packet identity=%s packet_id=%s source=ble; "
+                "see database packet decision for details",
+                ieee_address,
                 data.get("packet_id"),
-                mac,
             )
             continue
 

@@ -132,7 +132,6 @@ class ESP32MQTTReader:
         self._on_reading = on_reading
         self._on_activity = on_activity
         self.topic_prefix = topic_prefix.strip("/") or "heating-esp"
-        self._last_packet_ids: dict[str, int] = {}
 
     @property
     def subscription_topics(self) -> list[str]:
@@ -264,9 +263,6 @@ class ESP32MQTTReader:
             return
         packet_id = int(packet_id)
         identity = sensor_identity("shelly_raw_payload", mac)
-        if packet_id == self._last_packet_ids.get(identity):
-            logger.debug("Ignoring repeated ESP32 BTHome packet id %d for %s", packet_id, identity)
-            return
         if "temperature" not in data and "humidity" not in data:
             logger.warning("Ignoring ESP32 BTHome payload on %s: no temperature or humidity", topic)
             return
@@ -281,9 +277,14 @@ class ESP32MQTTReader:
             packet_id=packet_id,
             zone=ESP32_SENSOR_ZONES.get("shelly_raw_payload"),
         )
+        logger.info(
+            "ESP32 BTHome packet received identity=%s packet_id=%d "
+            "source=esp32; forwarding for persistent deduplication",
+            identity,
+            packet_id,
+        )
         if self._on_reading:
             self._on_reading(reading)
-        self._last_packet_ids[identity] = packet_id
 
 
 async def run_esp32_mqtt_reader(

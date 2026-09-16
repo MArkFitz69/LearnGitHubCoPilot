@@ -1,12 +1,18 @@
 """SQLite persistence, schema migrations, and atomic sensor writes."""
 
+import logging
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from .config import DATABASE_PATH, SHELLY_SOURCE_FALLBACK_SECONDS
+from .config import (
+    DATABASE_PATH,
+    SHELLY_HEARTBEAT_REPEAT_SECONDS,
+    SHELLY_SOURCE_FALLBACK_SECONDS,
+)
 
 SCHEMA_VERSION = 5
+logger = logging.getLogger(__name__)
 
 
 def get_connection() -> sqlite3.Connection:
@@ -537,6 +543,8 @@ def insert_reading(
 ) -> bool:
     """Atomically store a reading and reject duplicate/stale BTHome packets."""
     now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    packet_decision = None
+    packet_delta = None
     try:
         conn.execute("BEGIN IMMEDIATE")
         if packet_id is not None:
@@ -553,29 +561,93 @@ def insert_reading(
                         datetime.now() - _parse_timestamp(preferred["last_seen"])
                     ).total_seconds()
                     if age < SHELLY_SOURCE_FALLBACK_SECONDS:
+                        logger.info(
+                            "Rejected BTHome packet identity=%s packet_id=%d "
+                            "delta=not-checked source=%s reason=non-authoritative "
+                            "preferred_source=%s preferred_age_seconds=%.1f "
+                            "fallback_seconds=%d",
+                            ieee_address,
+                            packet_id,
+                            source,
+                            authoritative_source,
+                            age,
+                            SHELLY_SOURCE_FALLBACK_SECONDS,
+                        )
                         conn.rollback()
                         return False
 
             previous = conn.execute(
                 """
-                SELECT packet_id, source FROM mqtt_packet_state
+                SELECT packet_id, updated_at, source FROM mqtt_packet_state
                 WHERE ieee_address=?
                 """,
                 (ieee_address,),
             ).fetchone()
             if previous:
-                if previous["packet_id"] == packet_id:
-                    conn.rollback()
-                    return False
                 source_takeover = (
                     authoritative_source
                     and source == authoritative_source
                     and previous["source"] != authoritative_source
                 )
-                delta = (int(packet_id) - int(previous["packet_id"])) % 256
-                if not source_takeover and not 1 <= delta <= 127:
+                packet_delta = (
+                    int(packet_id) - int(previous["packet_id"])
+                ) % 256
+                if packet_delta == 0:
+                    repeat_age = (
+                        datetime.now() - _parse_timestamp(previous["updated_at"])
+                    ).total_seconds()
+                    authoritative_repeat = (
+                        authoritative_source
+                        and source == authoritative_source
+                        and previous["source"] == source
+                    )
+                    if (
+                        not authoritative_repeat
+                        or repeat_age < SHELLY_HEARTBEAT_REPEAT_SECONDS
+                    ):
+                        logger.info(
+                            "Rejected BTHome packet identity=%s packet_id=%d "
+                            "delta=0 source=%s reason=%s age_seconds=%.1f "
+                            "heartbeat_seconds=%d previous_source=%s "
+                            "authoritative_source=%s",
+                            ieee_address,
+                            packet_id,
+                            source,
+                            (
+                                "rapid-repeat"
+                                if authoritative_repeat
+                                else "duplicate"
+                            ),
+                            repeat_age,
+                            SHELLY_HEARTBEAT_REPEAT_SECONDS,
+                            previous["source"],
+                            authoritative_source,
+                        )
+                        conn.rollback()
+                        return False
+                    packet_decision = "authoritative-heartbeat"
+                elif not source_takeover and not 1 <= packet_delta <= 127:
+                    logger.warning(
+                        "Rejected BTHome packet identity=%s packet_id=%d "
+                        "delta=%d source=%s reason=stale-or-out-of-range "
+                        "previous_packet_id=%d previous_source=%s",
+                        ieee_address,
+                        packet_id,
+                        packet_delta,
+                        source,
+                        previous["packet_id"],
+                        previous["source"],
+                    )
                     conn.rollback()
                     return False
+                else:
+                    packet_decision = (
+                        "authoritative-source-takeover"
+                        if source_takeover
+                        else "advancing-sequence"
+                    )
+            else:
+                packet_decision = "first-packet"
 
         conn.execute(
             """
@@ -625,6 +697,16 @@ def insert_reading(
                 (ieee_address, source, now),
             )
         conn.commit()
+        if packet_id is not None:
+            logger.info(
+                "Accepted BTHome packet identity=%s packet_id=%d delta=%s "
+                "source=%s reason=%s",
+                ieee_address,
+                packet_id,
+                packet_delta if packet_delta is not None else "new",
+                source,
+                packet_decision,
+            )
         return True
     except Exception:
         conn.rollback()

@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 from datetime import datetime, timedelta
 
@@ -229,6 +230,204 @@ class PacketAndMQTTTests(unittest.TestCase):
         self.assertTrue(insert_reading(self.conn, OUTDOOR, 11, 50, packet_id=0, source="esp32"))
         self.assertFalse(insert_reading(self.conn, OUTDOOR, 9, 50, packet_id=250, source="esp32"))
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0], 2)
+
+    def test_authoritative_repeat_is_stored_after_heartbeat_interval(self):
+        with mock.patch(
+            "zigbee_sensor_reader.database.SHELLY_HEARTBEAT_REPEAT_SECONDS",
+            300,
+        ):
+            self.assertTrue(
+                insert_reading(
+                    self.conn, OUTDOOR, 14.8, 79, packet_id=180,
+                    source="esp32",
+                    authoritative_source="esp32",
+                )
+            )
+            old_timestamp = (datetime.now() - timedelta(seconds=301)).strftime(
+                "%Y-%m-%dT%H:%M:%S"
+            )
+            self.conn.execute(
+                "UPDATE mqtt_packet_state SET updated_at=? WHERE ieee_address=?",
+                (old_timestamp, OUTDOOR),
+            )
+            self.conn.execute(
+                """
+                UPDATE readings
+                SET timestamp=?, reading_date=?, reading_time=?
+                WHERE ieee_address=?
+                """,
+                (
+                    old_timestamp,
+                    old_timestamp[:10],
+                    old_timestamp[11:19],
+                    OUTDOOR,
+                ),
+            )
+            self.conn.execute(
+                "UPDATE sensors SET last_seen=? WHERE ieee_address=?",
+                (old_timestamp, OUTDOOR),
+            )
+            self.conn.commit()
+
+            with self.assertLogs(
+                "zigbee_sensor_reader.database", level="INFO"
+            ) as logs:
+                self.assertTrue(
+                    insert_reading(
+                        self.conn, OUTDOOR, 14.8, 79, packet_id=180,
+                        source="esp32", authoritative_source="esp32",
+                    )
+                )
+
+        rows = self.conn.execute(
+            "SELECT timestamp FROM readings WHERE ieee_address=? ORDER BY id",
+            (OUTDOOR,),
+        ).fetchall()
+        last_seen = self.conn.execute(
+            "SELECT last_seen FROM sensors WHERE ieee_address=?",
+            (OUTDOOR,),
+        ).fetchone()[0]
+        self.assertEqual(len(rows), 2)
+        self.assertGreater(rows[-1]["timestamp"], rows[0]["timestamp"])
+        self.assertEqual(last_seen, rows[-1]["timestamp"])
+        message = "\n".join(logs.output)
+        self.assertIn("Accepted BTHome packet", message)
+        self.assertIn("identity=" + OUTDOOR, message)
+        self.assertIn("packet_id=180", message)
+        self.assertIn("delta=0", message)
+        self.assertIn("source=esp32", message)
+        self.assertIn("reason=authoritative-heartbeat", message)
+
+    def test_rapid_authoritative_repeat_is_rejected_with_visible_reason(self):
+        with mock.patch(
+            "zigbee_sensor_reader.database.SHELLY_HEARTBEAT_REPEAT_SECONDS",
+            300,
+        ):
+            self.assertTrue(
+                insert_reading(
+                    self.conn, OUTDOOR, 10, 50, packet_id=8, source="esp32",
+                    authoritative_source="esp32",
+                )
+            )
+            with self.assertLogs(
+                "zigbee_sensor_reader.database", level="INFO"
+            ) as logs:
+                self.assertFalse(
+                    insert_reading(
+                        self.conn, OUTDOOR, 10, 50, packet_id=8,
+                        source="esp32", authoritative_source="esp32",
+                    )
+                )
+
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0],
+            1,
+        )
+        message = "\n".join(logs.output)
+        self.assertIn("Rejected BTHome packet", message)
+        self.assertIn("delta=0", message)
+        self.assertIn("reason=rapid-repeat", message)
+        self.assertIn("heartbeat_seconds=300", message)
+
+    def test_stale_packet_rejection_logs_delta_and_source(self):
+        self.assertTrue(
+            insert_reading(
+                self.conn, OUTDOOR, 10, 50, packet_id=20, source="esp32",
+                authoritative_source="esp32",
+            )
+        )
+        with self.assertLogs(
+            "zigbee_sensor_reader.database", level="WARNING"
+        ) as logs:
+            self.assertFalse(
+                insert_reading(
+                    self.conn, OUTDOOR, 9, 50, packet_id=200, source="esp32",
+                    authoritative_source="esp32",
+                )
+            )
+        message = "\n".join(logs.output)
+        self.assertIn("packet_id=200", message)
+        self.assertIn("delta=180", message)
+        self.assertIn("source=esp32", message)
+        self.assertIn("reason=stale-or-out-of-range", message)
+
+    def test_authoritative_source_takeover_behavior_is_unchanged(self):
+        self.assertTrue(
+            insert_reading(
+                self.conn, OUTDOOR, 10, 50, packet_id=100, source="ble",
+                authoritative_source="esp32",
+            )
+        )
+        self.assertTrue(
+            insert_reading(
+                self.conn, OUTDOOR, 11, 50, packet_id=50, source="esp32",
+                authoritative_source="esp32",
+            )
+        )
+        state = self.conn.execute(
+            "SELECT packet_id, source FROM mqtt_packet_state WHERE ieee_address=?",
+            (OUTDOOR,),
+        ).fetchone()
+        self.assertEqual(dict(state), {"packet_id": 50, "source": "esp32"})
+
+    def test_attic_ble_authoritative_repeat_uses_same_heartbeat_rule(self):
+        attic = "shelly:FC:4D:6A:1D:1D:FB"
+        upsert_sensor(self.conn, attic, "Attic", "Shelly Blu H&T", "Zone 5")
+        with mock.patch(
+            "zigbee_sensor_reader.database.SHELLY_HEARTBEAT_REPEAT_SECONDS",
+            300,
+        ):
+            self.assertTrue(
+                insert_reading(
+                    self.conn, attic, 20, 55, packet_id=9, source="ble",
+                    authoritative_source="ble",
+                )
+            )
+            old_timestamp = (datetime.now() - timedelta(seconds=301)).strftime(
+                "%Y-%m-%dT%H:%M:%S"
+            )
+            self.conn.execute(
+                "UPDATE mqtt_packet_state SET updated_at=? WHERE ieee_address=?",
+                (old_timestamp, attic),
+            )
+            self.conn.commit()
+            self.assertTrue(
+                insert_reading(
+                    self.conn, attic, 20, 55, packet_id=9, source="ble",
+                    authoritative_source="ble",
+                )
+            )
+
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM readings WHERE ieee_address=?",
+            (attic,),
+        ).fetchone()[0]
+        self.assertEqual(count, 2)
+
+    def test_collector_rejection_log_is_visible_and_identifies_packet(self):
+        reading = SimpleNamespace(
+            ieee_address=OUTDOOR,
+            friendly_name="Outdoor",
+            model="Shelly Blu H&T",
+            temperature_c=10,
+            humidity_pct=50,
+            battery_pct=90,
+            link_quality=None,
+            packet_id=11,
+            source="esp32",
+            zone="Zone 4",
+        )
+        self.assertTrue(handle_reading(reading, self.conn))
+        with self.assertLogs(
+            "zigbee_sensor_reader.__main__", level="INFO"
+        ) as logs:
+            self.assertFalse(handle_reading(reading, self.conn))
+
+        message = "\n".join(logs.output)
+        self.assertIn("Skipped duplicate, stale, or non-authoritative", message)
+        self.assertIn("identity=" + OUTDOOR, message)
+        self.assertIn("packet_id=11", message)
+        self.assertIn("source=esp32", message)
 
     def test_authoritative_source_with_ble_fallback_guard(self):
         self.assertTrue(

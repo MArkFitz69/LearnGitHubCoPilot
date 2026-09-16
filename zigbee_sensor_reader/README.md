@@ -52,7 +52,13 @@ Compact or whitespace-separated plain BTHome v2 hex is accepted; malformed,
 unsupported, or encrypted payloads are logged and ignored. Packet IDs are
 deduplicated persistently with 8-bit sequence handling. Outdoor prefers ESP32
 and falls back to BLE only after `SHELLY_SOURCE_FALLBACK_SECONDS` (default 1800)
-without an ESP32 packet. Attic prefers BLE.
+without an ESP32 packet. Attic prefers BLE. When an authoritative source keeps
+republishing the same valid BTHome advertisement, rapid repeats are rejected,
+but one unchanged heartbeat is stored after
+`SHELLY_HEARTBEAT_REPEAT_SECONDS` (default 300). This keeps sensor timestamps
+current without recording every MQTT retransmission. Accepted and rejected
+packet decisions are logged at INFO with identity, source, packet ID, delta,
+and reason.
 
 ## Raspberry Pi setup
 
@@ -73,6 +79,7 @@ export Z2M_MQTT_HOST=home-logger
 export Z2M_MQTT_PORT=8081
 export Z2M_MQTT_TRANSPORT=websockets
 export ESP32_TOPIC_PREFIX=heating-esp
+export SHELLY_HEARTBEAT_REPEAT_SECONDS=300
 ```
 
 The ESP32 client inherits every Z2M broker setting unless the corresponding

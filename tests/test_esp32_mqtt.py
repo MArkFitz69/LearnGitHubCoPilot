@@ -118,14 +118,17 @@ class ESP32ReaderTests(unittest.TestCase):
             self.reader.handle_message(topic, payload)
         self.assertEqual(self.readings, [])
 
-    def test_json_shelly_dispatch_mac_identity_and_cross_topic_deduplication(self):
+    def test_json_and_plain_shelly_packets_are_forwarded_to_persistent_deduplication(self):
         json_topic = "heating-esp/sensor/outdoorh_t_json/state"
         plain_topic = "heating-esp/sensor/shelly_raw_payload/state"
         json_payload = '{"mac":"94b216088298","payload":"44007E01642E4345D900"}'
-        self.reader.handle_message(json_topic, json_payload)
-        self.reader.handle_message(plain_topic, "44007E01642E4345D900")
+        with self.assertLogs(
+            "zigbee_sensor_reader.esp32_mqtt_reader", level="INFO"
+        ) as logs:
+            self.reader.handle_message(json_topic, json_payload)
+            self.reader.handle_message(plain_topic, "44007E01642E4345D900")
 
-        self.assertEqual(len(self.readings), 1)
+        self.assertEqual(len(self.readings), 2)
         reading = self.readings[0]
         self.assertEqual(reading.ieee_address, "shelly:94:B2:16:08:82:98")
         self.assertEqual(reading.friendly_name, "Outdoor")
@@ -134,6 +137,12 @@ class ESP32ReaderTests(unittest.TestCase):
         self.assertEqual(reading.humidity_pct, 67)
         self.assertEqual(reading.battery_pct, 100)
         self.assertEqual(reading.zone, "Zone 4")
+        self.assertEqual(self.readings[1].packet_id, 126)
+        message = "\n".join(logs.output)
+        self.assertIn("identity=shelly:94:B2:16:08:82:98", message)
+        self.assertIn("packet_id=126", message)
+        self.assertIn("source=esp32", message)
+        self.assertIn("persistent deduplication", message)
 
     def test_plain_hex_topic_remains_supported(self):
         self.reader.handle_message(

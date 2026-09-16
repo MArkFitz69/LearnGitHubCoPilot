@@ -110,10 +110,12 @@ def handle_reading(reading, conn=None) -> bool:
             ),
         )
         if not stored:
-            logger.debug(
-                "Skipped duplicate, stale, or non-authoritative packet %s for %s",
-                getattr(reading, "packet_id", None),
+            logger.info(
+                "Skipped duplicate, stale, or non-authoritative packet "
+                "identity=%s packet_id=%s source=%s",
                 reading.ieee_address,
+                getattr(reading, "packet_id", None),
+                source,
             )
             return False
 

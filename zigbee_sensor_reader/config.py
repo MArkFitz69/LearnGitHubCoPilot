@@ -94,6 +94,10 @@ SHELLY_AUTHORITATIVE_SOURCES: dict[str, str] = {
 SHELLY_SOURCE_FALLBACK_SECONDS = int(
     os.environ.get("SHELLY_SOURCE_FALLBACK_SECONDS", "1800")
 )
+SHELLY_HEARTBEAT_REPEAT_SECONDS = max(
+    1,
+    int(os.environ.get("SHELLY_HEARTBEAT_REPEAT_SECONDS", "300")),
+)
 
 # ESP32 MQTT sensor feed. The reader uses the Zigbee2MQTT broker connection
 # settings by default; only the ESPHome node/topic prefix normally needs to be
