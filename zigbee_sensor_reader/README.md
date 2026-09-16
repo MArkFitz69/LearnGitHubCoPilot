@@ -65,6 +65,11 @@ tracking (used by `/system` and `/api/system`) is updated independently on
 every MQTT message regardless of this interval, so raising it does not delay
 detecting an offline sensor. Lower it (e.g. `SHELLY_HEARTBEAT_REPEAT_SECONDS=300`)
 if you want unchanged heartbeats stored more frequently than every 15 minutes.
+If the physical sensor or forwarding path resets its 8-bit packet counter, an
+otherwise stale/out-of-range counter is accepted only from that sensor's
+configured authoritative source after
+`SHELLY_COUNTER_RESET_SECONDS` (default 1800). Rapid stale packets and stale
+fallback-source packets remain rejected.
 
 ## Raspberry Pi setup
 
@@ -86,6 +91,7 @@ export Z2M_MQTT_PORT=8081
 export Z2M_MQTT_TRANSPORT=websockets
 export ESP32_TOPIC_PREFIX=heating-esp
 export SHELLY_HEARTBEAT_REPEAT_SECONDS=900
+export SHELLY_COUNTER_RESET_SECONDS=1800
 # Lower to 300 for more frequent unchanged-value heartbeats if desired.
 ```
 

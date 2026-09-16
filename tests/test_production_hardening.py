@@ -351,6 +351,140 @@ class PacketAndMQTTTests(unittest.TestCase):
         self.assertIn("source=esp32", message)
         self.assertIn("reason=stale-or-out-of-range", message)
 
+    def test_authoritative_counter_reset_is_accepted_after_silence(self):
+        with mock.patch(
+            "zigbee_sensor_reader.database.SHELLY_COUNTER_RESET_SECONDS",
+            1800,
+        ):
+            self.assertTrue(
+                insert_reading(
+                    self.conn, OUTDOOR, 14.8, 79, packet_id=223,
+                    source="esp32", authoritative_source="esp32",
+                )
+            )
+            old_timestamp = (datetime.now() - timedelta(seconds=2400)).strftime(
+                "%Y-%m-%dT%H:%M:%S"
+            )
+            self.conn.execute(
+                "UPDATE mqtt_packet_state SET updated_at=? WHERE ieee_address=?",
+                (old_timestamp, OUTDOOR),
+            )
+            self.conn.commit()
+
+            with self.assertLogs(
+                "zigbee_sensor_reader.database", level="INFO"
+            ) as logs:
+                self.assertTrue(
+                    insert_reading(
+                        self.conn, OUTDOOR, 14.9, 78, packet_id=191,
+                        source="esp32", authoritative_source="esp32",
+                    )
+                )
+
+        state = self.conn.execute(
+            """
+            SELECT packet_id, source FROM mqtt_packet_state
+            WHERE ieee_address=?
+            """,
+            (OUTDOOR,),
+        ).fetchone()
+        self.assertEqual(dict(state), {"packet_id": 191, "source": "esp32"})
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0],
+            2,
+        )
+        message = "\n".join(logs.output)
+        self.assertIn("packet_id=191", message)
+        self.assertIn("delta=224", message)
+        self.assertIn("source=esp32", message)
+        self.assertIn("reason=authoritative-counter-reset", message)
+
+    def test_authoritative_counter_reset_is_rejected_inside_threshold(self):
+        with mock.patch(
+            "zigbee_sensor_reader.database.SHELLY_COUNTER_RESET_SECONDS",
+            1800,
+        ):
+            self.assertTrue(
+                insert_reading(
+                    self.conn, OUTDOOR, 14.8, 79, packet_id=223,
+                    source="esp32", authoritative_source="esp32",
+                )
+            )
+            recent_timestamp = (
+                datetime.now() - timedelta(seconds=1799)
+            ).strftime("%Y-%m-%dT%H:%M:%S")
+            self.conn.execute(
+                "UPDATE mqtt_packet_state SET updated_at=? WHERE ieee_address=?",
+                (recent_timestamp, OUTDOOR),
+            )
+            self.conn.commit()
+
+            with self.assertLogs(
+                "zigbee_sensor_reader.database", level="WARNING"
+            ) as logs:
+                self.assertFalse(
+                    insert_reading(
+                        self.conn, OUTDOOR, 14.9, 78, packet_id=191,
+                        source="esp32", authoritative_source="esp32",
+                    )
+                )
+
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0],
+            1,
+        )
+        message = "\n".join(logs.output)
+        self.assertIn("packet_id=191", message)
+        self.assertIn("delta=224", message)
+        self.assertIn("reason=stale-or-out-of-range", message)
+        self.assertIn("counter_reset_seconds=1800", message)
+
+    def test_non_authoritative_stale_packet_cannot_use_counter_reset(self):
+        with (
+            mock.patch(
+                "zigbee_sensor_reader.database.SHELLY_COUNTER_RESET_SECONDS",
+                1800,
+            ),
+            mock.patch(
+                "zigbee_sensor_reader.database.SHELLY_SOURCE_FALLBACK_SECONDS",
+                1800,
+            ),
+        ):
+            self.assertTrue(
+                insert_reading(
+                    self.conn, OUTDOOR, 14.8, 79, packet_id=223,
+                    source="esp32", authoritative_source="esp32",
+                )
+            )
+            old_timestamp = (datetime.now() - timedelta(seconds=2400)).strftime(
+                "%Y-%m-%dT%H:%M:%S"
+            )
+            self.conn.execute(
+                "UPDATE mqtt_packet_state SET updated_at=? WHERE ieee_address=?",
+                (old_timestamp, OUTDOOR),
+            )
+            self.conn.execute(
+                """
+                UPDATE sensor_source_state SET last_seen=?
+                WHERE ieee_address=? AND source='esp32'
+                """,
+                (old_timestamp, OUTDOOR),
+            )
+            self.conn.commit()
+
+            self.assertFalse(
+                insert_reading(
+                    self.conn, OUTDOOR, 14.9, 78, packet_id=191,
+                    source="ble", authoritative_source="esp32",
+                )
+            )
+
+        state = self.conn.execute(
+            "SELECT packet_id, source FROM mqtt_packet_state WHERE ieee_address=?",
+            (OUTDOOR,),
+        ).fetchone()
+        self.assertEqual(dict(state), {"packet_id": 223, "source": "esp32"})
+
     def test_authoritative_source_takeover_behavior_is_unchanged(self):
         self.assertTrue(
             insert_reading(

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .config import (
     DATABASE_PATH,
+    SHELLY_COUNTER_RESET_SECONDS,
     SHELLY_HEARTBEAT_REPEAT_SECONDS,
     SHELLY_SOURCE_FALLBACK_SECONDS,
 )
@@ -592,10 +593,10 @@ def insert_reading(
                 packet_delta = (
                     int(packet_id) - int(previous["packet_id"])
                 ) % 256
+                packet_age = (
+                    datetime.now() - _parse_timestamp(previous["updated_at"])
+                ).total_seconds()
                 if packet_delta == 0:
-                    repeat_age = (
-                        datetime.now() - _parse_timestamp(previous["updated_at"])
-                    ).total_seconds()
                     authoritative_repeat = (
                         authoritative_source
                         and source == authoritative_source
@@ -603,7 +604,7 @@ def insert_reading(
                     )
                     if (
                         not authoritative_repeat
-                        or repeat_age < SHELLY_HEARTBEAT_REPEAT_SECONDS
+                        or packet_age < SHELLY_HEARTBEAT_REPEAT_SECONDS
                     ):
                         logger.info(
                             "Rejected BTHome packet identity=%s packet_id=%d "
@@ -618,7 +619,7 @@ def insert_reading(
                                 if authoritative_repeat
                                 else "duplicate"
                             ),
-                            repeat_age,
+                            packet_age,
                             SHELLY_HEARTBEAT_REPEAT_SECONDS,
                             previous["source"],
                             authoritative_source,
@@ -627,19 +628,33 @@ def insert_reading(
                         return False
                     packet_decision = "authoritative-heartbeat"
                 elif not source_takeover and not 1 <= packet_delta <= 127:
-                    logger.warning(
-                        "Rejected BTHome packet identity=%s packet_id=%d "
-                        "delta=%d source=%s reason=stale-or-out-of-range "
-                        "previous_packet_id=%d previous_source=%s",
-                        ieee_address,
-                        packet_id,
-                        packet_delta,
-                        source,
-                        previous["packet_id"],
-                        previous["source"],
+                    authoritative_reset = (
+                        authoritative_source
+                        and source == authoritative_source
+                        and previous["source"] == source
+                        and packet_age >= SHELLY_COUNTER_RESET_SECONDS
                     )
-                    conn.rollback()
-                    return False
+                    if authoritative_reset:
+                        packet_decision = "authoritative-counter-reset"
+                    else:
+                        logger.warning(
+                            "Rejected BTHome packet identity=%s packet_id=%d "
+                            "delta=%d source=%s reason=stale-or-out-of-range "
+                            "age_seconds=%.1f counter_reset_seconds=%d "
+                            "previous_packet_id=%d previous_source=%s "
+                            "authoritative_source=%s",
+                            ieee_address,
+                            packet_id,
+                            packet_delta,
+                            source,
+                            packet_age,
+                            SHELLY_COUNTER_RESET_SECONDS,
+                            previous["packet_id"],
+                            previous["source"],
+                            authoritative_source,
+                        )
+                        conn.rollback()
+                        return False
                 else:
                     packet_decision = (
                         "authoritative-source-takeover"
