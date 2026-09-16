@@ -55,17 +55,16 @@ and falls back to BLE only after `SHELLY_SOURCE_FALLBACK_SECONDS` (default 1800)
 without an ESP32 packet. Attic prefers BLE. When an authoritative source keeps
 republishing the same valid BTHome advertisement, rapid repeats are rejected,
 but one unchanged heartbeat is stored after
-`SHELLY_HEARTBEAT_REPEAT_SECONDS` (default 300). This keeps sensor timestamps
-current without recording every MQTT retransmission. Accepted and rejected
-packet decisions are logged at INFO with identity, source, packet ID, delta,
-and reason. This setting only throttles unchanged-value rows written to the
-`readings` table; ESP32/Shelly device-health "last seen" tracking (used by
-`/system` and `/api/system`) is updated independently on every MQTT message
-regardless of this interval, so raising it does not delay detecting an
-offline sensor. If your Shelly is polled more often than your other sensors
-report (e.g. every 5 minutes vs. every 15 minutes for Sonoff/Z2M/heating
-probes) and you want one row per 15 minutes to match, set
-`SHELLY_HEARTBEAT_REPEAT_SECONDS=900`.
+`SHELLY_HEARTBEAT_REPEAT_SECONDS` (default 900, i.e. one row per 15 minutes to
+match typical Sonoff/Z2M/heating-probe reporting cadence). This keeps sensor
+timestamps current without recording every MQTT retransmission. Accepted and
+rejected packet decisions are logged at INFO with identity, source, packet
+ID, delta, and reason. This setting only throttles unchanged-value rows
+written to the `readings` table; ESP32/Shelly device-health "last seen"
+tracking (used by `/system` and `/api/system`) is updated independently on
+every MQTT message regardless of this interval, so raising it does not delay
+detecting an offline sensor. Lower it (e.g. `SHELLY_HEARTBEAT_REPEAT_SECONDS=300`)
+if you want unchanged heartbeats stored more frequently than every 15 minutes.
 
 ## Raspberry Pi setup
 
@@ -86,8 +85,8 @@ export Z2M_MQTT_HOST=home-logger
 export Z2M_MQTT_PORT=8081
 export Z2M_MQTT_TRANSPORT=websockets
 export ESP32_TOPIC_PREFIX=heating-esp
-export SHELLY_HEARTBEAT_REPEAT_SECONDS=300
-# Use 900 instead of 300 to match a 15-minute reporting cadence with other sensors.
+export SHELLY_HEARTBEAT_REPEAT_SECONDS=900
+# Lower to 300 for more frequent unchanged-value heartbeats if desired.
 ```
 
 The ESP32 client inherits every Z2M broker setting unless the corresponding

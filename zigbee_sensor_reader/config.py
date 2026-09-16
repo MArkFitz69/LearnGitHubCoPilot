@@ -96,7 +96,7 @@ SHELLY_SOURCE_FALLBACK_SECONDS = int(
 )
 SHELLY_HEARTBEAT_REPEAT_SECONDS = max(
     1,
-    int(os.environ.get("SHELLY_HEARTBEAT_REPEAT_SECONDS", "300")),
+    int(os.environ.get("SHELLY_HEARTBEAT_REPEAT_SECONDS", "900")),
 )
 
 # ESP32 MQTT sensor feed. The reader uses the Zigbee2MQTT broker connection
