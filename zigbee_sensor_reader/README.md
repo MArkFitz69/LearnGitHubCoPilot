@@ -58,7 +58,14 @@ but one unchanged heartbeat is stored after
 `SHELLY_HEARTBEAT_REPEAT_SECONDS` (default 300). This keeps sensor timestamps
 current without recording every MQTT retransmission. Accepted and rejected
 packet decisions are logged at INFO with identity, source, packet ID, delta,
-and reason.
+and reason. This setting only throttles unchanged-value rows written to the
+`readings` table; ESP32/Shelly device-health "last seen" tracking (used by
+`/system` and `/api/system`) is updated independently on every MQTT message
+regardless of this interval, so raising it does not delay detecting an
+offline sensor. If your Shelly is polled more often than your other sensors
+report (e.g. every 5 minutes vs. every 15 minutes for Sonoff/Z2M/heating
+probes) and you want one row per 15 minutes to match, set
+`SHELLY_HEARTBEAT_REPEAT_SECONDS=900`.
 
 ## Raspberry Pi setup
 
@@ -80,6 +87,7 @@ export Z2M_MQTT_PORT=8081
 export Z2M_MQTT_TRANSPORT=websockets
 export ESP32_TOPIC_PREFIX=heating-esp
 export SHELLY_HEARTBEAT_REPEAT_SECONDS=300
+# Use 900 instead of 300 to match a 15-minute reporting cadence with other sensors.
 ```
 
 The ESP32 client inherits every Z2M broker setting unless the corresponding
