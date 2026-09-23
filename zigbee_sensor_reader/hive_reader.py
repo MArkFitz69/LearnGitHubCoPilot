@@ -14,7 +14,7 @@ import logging
 import os
 from datetime import datetime
 
-from .config import HIVE_NAMES, ZONES
+from .config import HIVE_NAMES, HIVE_NAMES_BY_ID, HIVE_ZONES_BY_ID, ZONES
 from .database import get_connection, upsert_sensor, insert_reading
 
 logger = logging.getLogger(__name__)
@@ -63,7 +63,10 @@ async def fetch_hive_data() -> dict:
         for dev in session.get("climate", []):
             hive_name = dev.get("hiveName", "Unknown")
             device_id = dev.get("hiveID", dev.get("device_id", "unknown"))
-            friendly_name = HIVE_NAMES.get(hive_name, hive_name)
+            # The device UUID is the stable identity; the "hiveName" string
+            # (e.g. "Thermostat 4") can drift from its physical unit, so
+            # prefer the UUID-keyed maps whenever the UUID is recognized.
+            friendly_name = HIVE_NAMES_BY_ID.get(device_id) or HIVE_NAMES.get(hive_name, hive_name)
 
             try:
                 temp = await hive.heating.getCurrentTemperature(dev)
@@ -83,7 +86,7 @@ async def fetch_hive_data() -> dict:
                     "heating_on": heating_on,
                     "boost": boost,
                     "battery_pct": battery,
-                    "zone": ZONES.get(hive_name),
+                    "zone": HIVE_ZONES_BY_ID.get(device_id) or ZONES.get(hive_name),
                 }
                 heating_results.append(heating_data)
                 heat_status = "HEATING" if heating_on else "off"
@@ -115,7 +118,7 @@ async def fetch_hive_data() -> dict:
         for dev in hw_devices:
             hive_name = dev.get("hiveName", dev.get("hive_name", "Hot Water"))
             device_id = dev.get("hiveID", dev.get("device_id", "hotwater"))
-            friendly_name = HIVE_NAMES.get(hive_name, hive_name)
+            friendly_name = HIVE_NAMES_BY_ID.get(device_id) or HIVE_NAMES.get(hive_name, hive_name)
 
             # Discover available methods on hive.hotwater at runtime
             hw_api = hive.hotwater
@@ -149,7 +152,7 @@ async def fetch_hive_data() -> dict:
                     "hw_on": hw_on,
                     "mode": mode,
                     "boost": boost_active,
-                    "zone": ZONES.get(hive_name),
+                    "zone": HIVE_ZONES_BY_ID.get(device_id) or ZONES.get(hive_name),
                 }
                 hotwater_results.append(hw_data)
                 logger.info(

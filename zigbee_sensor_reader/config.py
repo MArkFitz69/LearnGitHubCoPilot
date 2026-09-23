@@ -41,10 +41,24 @@ SENSOR_NAMES: dict[str, str] = {
 }
 
 # Friendly names for Hive thermostats (keyed by Hive device name)
+# NOTE: The Hive API's "hiveName" (e.g. "Thermostat 4") is NOT guaranteed to
+# stay attached to the same physical unit — Hive can reassign it. The device
+# UUID ("hiveID") is the stable identity, so HIVE_NAMES_BY_ID below takes
+# priority whenever a UUID is available; HIVE_NAMES is only a fallback.
 HIVE_NAMES: dict[str, str] = {
     "Thermostat 4": "Hall",
     "Thermostat 5": "Master Bedroom",
     "Thermostat 6": "Top Floor Landing",
+}
+
+# Friendly names for Hive thermostats keyed by the stable Hive device UUID
+# (dev["hiveID"]). Confirmed against the live Hive API on 2026-09-23:
+# "Thermostat 4"/"Thermostat 6" hiveNames had drifted from their physical
+# units, so identity here is resolved by UUID instead.
+HIVE_NAMES_BY_ID: dict[str, str] = {
+    "f6c19ec5-9ed6-453b-a3fc-4d4946b4e308": "Hall",
+    "05d5332d-77aa-467f-b143-f16df3c8d0d1": "Master Bedroom",
+    "d7fa836f-6cd3-444d-91e0-f3730754258e": "Top Floor Landing",
 }
 
 # Heating zones — groups sensors and thermostats for analysis
@@ -70,6 +84,15 @@ ZONES: dict[str, str] = {
     "94:B2:16:08:82:98": "Zone 4",          # Outdoor (Shelly Blu H&T)
     # Zone 5 - Attic
     "FC:4D:6A:1D:1D:FB": "Zone 5",          # Attic (Shelly Blu H&T)
+}
+
+# Heating zones for Hive thermostats keyed by the stable Hive device UUID
+# (dev["hiveID"]). Takes priority over ZONES's hiveName-keyed entries above —
+# see HIVE_NAMES_BY_ID for why.
+HIVE_ZONES_BY_ID: dict[str, str] = {
+    "f6c19ec5-9ed6-453b-a3fc-4d4946b4e308": "Zone 1",  # Hall
+    "05d5332d-77aa-467f-b143-f16df3c8d0d1": "Zone 2",  # Master Bedroom
+    "d7fa836f-6cd3-444d-91e0-f3730754258e": "Zone 3",  # Top Floor Landing
 }
 
 # Shelly Blu H&T sensors (keyed by BLE MAC address, uppercase with colons)

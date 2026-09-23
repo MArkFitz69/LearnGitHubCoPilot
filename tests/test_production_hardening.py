@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import io
 import json
@@ -899,6 +900,69 @@ class ReadOnlySurfaceTests(unittest.TestCase):
             main()
         self.assertIn("Hall: 20.0°C", output.getvalue())
         self.assertIn("Water: ON", output.getvalue())
+
+    def test_hive_identity_resolved_by_stable_uuid_not_drifted_hivename(self):
+        # Simulate the real-world drift: the Hive API's "hiveName" strings
+        # ("Thermostat 4"/"Thermostat 6") point at the wrong physical unit,
+        # but the device UUID ("hiveID") is stable and must win.
+        climate = [
+            {
+                "hiveName": "Thermostat 4",
+                "hiveID": "d7fa836f-6cd3-444d-91e0-f3730754258e",
+                "deviceData": {"battery": 90},
+            },
+            {
+                "hiveName": "Thermostat 6",
+                "hiveID": "f6c19ec5-9ed6-453b-a3fc-4d4946b4e308",
+                "deviceData": {"battery": 88},
+            },
+            {
+                "hiveName": "Thermostat 5",
+                "hiveID": "05d5332d-77aa-467f-b143-f16df3c8d0d1",
+                "deviceData": {"battery": 95},
+            },
+        ]
+
+        class FakeHeating:
+            async def getCurrentTemperature(self, dev):
+                return 20.0
+
+            async def getTargetTemperature(self, dev):
+                return 21.0
+
+            async def getMode(self, dev):
+                return "SCHEDULE"
+
+            async def getState(self, dev):
+                return "ON"
+
+            async def getBoostStatus(self, dev):
+                return "OFF"
+
+        class FakeHive:
+            def __init__(self, username, password):
+                pass
+
+            async def login(self):
+                return {}
+
+            async def startSession(self):
+                return {"climate": climate, "water_heater": []}
+
+            heating = FakeHeating()
+
+        fake_module = SimpleNamespace(Hive=FakeHive)
+        with (
+            mock.patch.object(hive_reader, "HIVE_USERNAME", "configured"),
+            mock.patch.object(hive_reader, "HIVE_PASSWORD", "configured"),
+            mock.patch.dict(sys.modules, {"apyhiveapi": fake_module}),
+        ):
+            data = asyncio.run(hive_reader.fetch_hive_data())
+
+        by_name = {h["name"]: h for h in data["heating"]}
+        self.assertEqual(by_name["Hall"]["zone"], "Zone 1")
+        self.assertEqual(by_name["Top Floor Landing"]["zone"], "Zone 3")
+        self.assertEqual(by_name["Master Bedroom"]["zone"], "Zone 2")
 
 
 class Z2MZonePersistenceTests(unittest.TestCase):
