@@ -10,6 +10,9 @@ requests>=2.28.0
 # Optional one-shot, read-only Duracell inverter diagnostic
 pymodbus>=3.11.0,<4.0
 
+# IANA timezone database for UK energy days and DST on Windows
+tzdata>=2024.1; sys_platform == "win32"
+
 # Shelly Blu H&T BLE sensor support
 bleak>=0.21.0
 

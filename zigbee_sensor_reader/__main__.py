@@ -247,6 +247,12 @@ async def run_collector() -> None:
             except Exception as exc:
                 logger.warning("myenergi poll failed: %r", exc)
             try:
+                from .duracell_reader import DURACELL_HOST, poll_duracell
+                if DURACELL_HOST:
+                    await poll_duracell()
+            except Exception as exc:
+                logger.warning("Duracell poll failed: %r", exc)
+            try:
                 from .config import SHELLY_SCAN_DURATION
                 from .shelly_ble_reader import poll_shelly_ble
                 await poll_shelly_ble(scan_duration=SHELLY_SCAN_DURATION)

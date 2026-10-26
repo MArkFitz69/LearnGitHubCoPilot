@@ -16,6 +16,7 @@ BLOCKS = (
     (0x1001, 24),  # Inverter output and both MPPT power pairs.
     (0x1300, 12),  # Grid exchange and grid-tied load power pairs.
 )
+ENERGY_BLOCKS = ((0x2000, 19), (0x1001, 40), (0x1300, 54))
 
 
 class DiagnosticError(Exception):
@@ -43,6 +44,30 @@ def candidate_values(registers: dict[int, int]) -> dict[str, float]:
     }
 
 
+def energy_values(registers: dict[int, int]) -> tuple[dict[str, float], dict[str, float]]:
+    """Extended Skyline candidates; daily counter units still need live checks."""
+    basic = candidate_values(registers)
+    live = {
+        "battery_soc_pct": basic["battery_soc_pct"],
+        "battery_voltage_v": basic["battery_voltage_v"],
+        "battery_power_w": basic["battery_power_w_sign_unverified"],
+        "grid_power_w": basic["grid_power_w_sign_unverified"],
+        "load_power_w": basic["grid_tied_load_w"],
+        "pv_power_w": basic["mppt1_power_w"] + basic["mppt2_power_w"],
+        "mppt1_voltage_v": registers[0x1010] / 10,
+        "mppt2_voltage_v": registers[0x1014] / 10,
+    }
+    daily = {}
+    for name, address, scale in (
+        ("solar_kwh", 0x1027, 1000),
+        ("grid_import_kwh", 0x1332, 100),
+        ("battery_charge_kwh", 0x200B, 100),
+        ("battery_discharge_kwh", 0x200F, 100),
+    ):
+        daily[name] = ((registers[address] << 16) | registers[address + 1]) / scale
+    return live, daily
+
+
 def read_block(client: ModbusTcpClient, address: int, count: int, unit: int) -> list[int]:
     """Use only function 03. Reject exceptions, missing and malformed data."""
     response = client.read_holding_registers(
@@ -62,7 +87,8 @@ def read_block(client: ModbusTcpClient, address: int, count: int, unit: int) -> 
     return values
 
 
-def diagnose(host: str, port: int = 502, unit: int = 1, timeout: float = 3) -> int:
+def diagnose(host: str, port: int = 502, unit: int = 1, timeout: float = 3,
+             *, energy: bool = False) -> int:
     """Make three sequential reads, with no retries or device/unit scans."""
     client = ModbusTcpClient(host, port=port, timeout=timeout, retries=0)
     registers: dict[int, int] = {}
@@ -74,7 +100,7 @@ def diagnose(host: str, port: int = 502, unit: int = 1, timeout: float = 3) -> i
     try:
         if not client.connect():
             raise DiagnosticError("Connection failed; no registers were read")
-        for index, (address, count) in enumerate(BLOCKS):
+        for index, (address, count) in enumerate(ENERGY_BLOCKS if energy else BLOCKS):
             if index:
                 time.sleep(0.25)
             values = read_block(client, address, count, unit)
@@ -87,6 +113,12 @@ def diagnose(host: str, port: int = 502, unit: int = 1, timeout: float = 3) -> i
         print("CANDIDATE decoding: big-endian bytes, high word first; NOT VERIFIED")
         for name, value in candidate_values(registers).items():
             print(f"  {name}: {value:g}")
+        if energy:
+            live, daily = energy_values(registers)
+            print("EXTENDED CANDIDATES: compare voltages and today's kWh with Dura-i")
+            for name, value in {**live, **daily}.items():
+                print(f"  {name}: {value:g}")
+            print("Daily counter reset timezone is UNVERIFIED; do not assume UK midnight.")
         if registers[0x2000] > 100:
             print("WARNING: SOC outside 0..100%; candidate register map does not match.")
         print("No data saved. Grid-tied load excludes any separate EPS/backup load.")
@@ -125,10 +157,14 @@ def main() -> None:
     parser.add_argument("--port", type=_port, default=502)
     parser.add_argument("--unit", type=_unit, default=1, help="Single unit ID; never scanned")
     parser.add_argument("--timeout", type=_timeout, default=3)
+    parser.add_argument("--energy", action="store_true",
+                        help="Also read candidate MPPT voltages and daily kWh counters")
     args = parser.parse_args()
     if not args.host.strip():
         parser.error("--host must not be empty")
-    raise SystemExit(diagnose(args.host, args.port, args.unit, args.timeout))
+    raise SystemExit(diagnose(
+        args.host, args.port, args.unit, args.timeout, energy=args.energy,
+    ))
 
 
 if __name__ == "__main__":

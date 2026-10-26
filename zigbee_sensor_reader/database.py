@@ -12,7 +12,7 @@ from .config import (
     SHELLY_SOURCE_FALLBACK_SECONDS,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 logger = logging.getLogger(__name__)
 
 
@@ -131,6 +131,9 @@ def _create_tables(conn: sqlite3.Connection) -> None:
                 )
                 """
             )
+        if version < 6:
+            from .energy_data import create_energy_tables
+            create_energy_tables(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         conn.commit()
     except Exception:

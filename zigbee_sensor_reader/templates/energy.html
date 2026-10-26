@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="refresh" content="60">
+  <title>Home Energy</title>
+  <style>
+    :root{color-scheme:dark;--muted:#a3b4c6;--line:#293b50;--green:#5de0ad}
+    *{box-sizing:border-box}body{margin:0;background:#0c1622;color:#eaf1f8;font:15px system-ui,sans-serif}
+    main{max-width:1240px;margin:auto;padding:26px}a{color:#8ac9ff}
+    header,.toolbar{display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap}
+    h1{font-size:32px;margin:8px 0}h2{margin-top:30px;font-size:21px}
+    h3{font-size:14px;font-weight:500;color:var(--muted);margin:0 0 12px}
+    .eyebrow{color:var(--green);font-size:12px;letter-spacing:2px}.muted,small{color:var(--muted)}
+    .banner{padding:16px 20px;border:1px solid var(--line);border-radius:12px;background:#122638;margin:22px 0}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}
+    .card{border:1px solid var(--line);background:#142131;border-radius:12px;padding:18px;min-width:0}
+    .value{font-size:30px;font-weight:650;margin:5px 0}.unit{font-size:15px;font-weight:400;color:var(--muted)}
+    .badge{display:inline-block;font-size:11px;border-radius:5px;padding:3px 6px;background:#26384b;margin:5px 4px 5px 0}
+    .warning{color:#ffd68b;background:#433523}.ok{color:var(--green)}
+    .card p{font-size:12px;line-height:1.5;margin:6px 0;overflow-wrap:anywhere}
+    input,button{padding:9px;border-radius:6px;border:1px solid #405670;background:#15283b;color:#fff}
+    button{cursor:pointer}table{width:100%;border-collapse:collapse;white-space:nowrap}
+    td,th{text-align:right;padding:13px 10px;border-bottom:1px solid var(--line)}
+    th:first-child,td:first-child{text-align:left}.scroll{overflow-x:auto}
+    svg{width:100%;height:130px;display:block}.charts{grid-template-columns:repeat(auto-fit,minmax(310px,1fr))}
+    .axis{display:flex;justify-content:space-between;font-size:11px;color:var(--muted)}
+    .health{margin-top:24px;line-height:1.8;overflow-wrap:anywhere}
+    .daily-energy-graph{height:auto;min-width:650px}
+    .legend{display:flex;flex-wrap:wrap;gap:12px;font-size:13px;margin-bottom:16px}
+    .swatch{display:inline-block;width:12px;height:12px;margin-right:6px;background:var(--series-color)}
+    @media(max-width:400px){.charts{grid-template-columns:minmax(0,1fr)}}
+  </style>
+</head>
+<body><main>
+  <header>
+    <div><div class="eyebrow">HOME / ENERGY</div><h1>Your energy, in view</h1>
+      <span class="muted">Duracell + myenergi &middot; UK calendar days &middot; 15-minute snapshots</span></div>
+    <nav><a href="/dashboard">Sensors</a> &nbsp; <a href="/system">System</a> &nbsp;
+      <a href="/api/energy?date={{ day }}">Energy JSON</a></nav>
+  </header>
+  <div class="banner">
+    <strong class="{{ 'ok' if tariff.cheap_now else '' }}">{{ 'Cheap tariff active now' if tariff.cheap_now else 'Standard tariff active now' }}</strong>
+    &nbsp; Fixed {{ tariff.fixed_window }}.
+    <div class="muted">Selected day's local window:
+      {% for interval in tariff.intervals %}{{ interval.label }}{% if not loop.last %}; {% endif %}{% endfor %}
+      &middot; {{ tariff.local_now }}</div>
+    <small>Tariff timing only. Prices and exact cheap/standard energy splits are not calculated.</small>
+  </div>
+  {% if not ready %}<p class="banner warning">Energy storage is not initialized. Update and restart the collector to apply the schema migration.</p>{% endif %}
+  <div class="toolbar"><h2>Latest readings</h2><small>Live snapshots are independent of the selected history date. Refreshes every 60s.</small></div>
+  <div class="grid">
+    {% for item in live %}
+    <article class="card">
+      <h3>{{ item.label }}</h3>
+      <div class="value">{{ "%.1f"|format(item.value) }} <span class="unit">{{ item.unit }}</span></div>
+      <span class="badge">{{ item.device }}</span>
+      {% if item.quality != 'verified' %}<span class="badge warning">Provisional mapping</span>{% endif %}
+      {% if item.stale %}<span class="badge warning">Stale &mdash; not live</span>{% endif %}
+      <p class="muted">Observed {{ item.observed_at }} (UTC)</p>
+    </article>
+    {% endfor %}
+    {% for item in missing_live %}<article class="card"><h3>{{ item.label }}</h3>
+      <div class="value">&mdash; <span class="unit">{{ item.unit }}</span></div><p class="muted">Unavailable &mdash; no measurements received.</p></article>{% endfor %}
+  </div>
+  <div class="toolbar">
+    <h2>Daily energy &middot; {{ day }}</h2>
+    <form action="/energy"><label for="date">UK date </label><input id="date" type="date" name="date" value="{{ day }}"><button type="submit">View</button></form>
+  </div>
+  <p class="muted">Device-reported energy only. Today is day-to-date; partial days are labelled. No estimates from power samples.</p>
+  <div class="grid">
+    {% for item in daily %}<article class="card"><h3>{{ item.label }}</h3>
+      <div class="value">{% if item.value is not none %}{{ "%.3f"|format(item.value) }}{% else %}&mdash;{% endif %} <span class="unit">kWh</span></div>
+      <span class="badge">{{ item.device }}</span>
+      <span class="badge {{ 'warning' if item.value is none or item.coverage != 'complete' else '' }}">{{ 'Unavailable' if item.value is none else item.coverage }}</span>
+      <p class="muted">{{ item.reason }}</p>
+      {% if item.updated_at %}<p class="muted">Counter/history updated {{ item.updated_at }} (UTC)</p>{% endif %}
+    </article>{% endfor %}
+  </div>
+  <h2>Seven-day history <span class="unit">(kWh)</span></h2>
+  <p class="muted">One day per column, with grid and solar supply overlaid by house, eddi and zappi consumption on the same kWh scale. Bars overlap, not stack; do not add them together. Dashed outlines indicate partial totals. Missing values have no bar, not a zero reading.</p>
+  <div class="card">
+    <div class="legend">{% for series in daily_graph.series %}<span><span class="swatch" style="--series-color:{{ series.color }}"></span>{{ series.label }}{% if not series.available %} &mdash; unavailable{% endif %}</span>{% endfor %}</div>
+    <div class="scroll">
+      <svg class="daily-energy-graph" viewBox="0 0 720 320" role="img" aria-labelledby="daily-graph-title daily-graph-description">
+        <title id="daily-graph-title">Daily energy supply and consumption overlays (kWh)</title>
+        <desc id="daily-graph-description">Seven UK days on a shared scale. Wider bars show grid and solar; narrower bars overlay consumption. Dashed outlines mean partial. House consumption is unavailable until independently measured. Missing bars are not zero.</desc>
+        {% for fraction in [0, 0.25, 0.5, 0.75, 1] %}
+          <line x1="50" x2="680" y1="{{ 270 - fraction * 240 }}" y2="{{ 270 - fraction * 240 }}" stroke="#293b50"/>
+          <text x="44" y="{{ 274 - fraction * 240 }}" text-anchor="end" fill="#a3b4c6" font-size="11">{{ "%.1f"|format(daily_graph.maximum * fraction) }}</text>
+        {% endfor %}
+        {% for series in daily_graph.series %}{% for bar in series.bars %}
+          {% if bar.value is not none %}
+          <g><title>{{ bar.day }}: {{ series.label }}, {{ "%.3f"|format(bar.value) }} kWh, {{ bar.coverage }}</title>
+            {% if bar.value > 0 %}<rect x="{{ bar.x - series.width / 2 }}" y="{{ 270 - bar.height }}" width="{{ series.width }}" height="{{ bar.height }}" fill="{{ series.color }}" fill-opacity="0.2" stroke="{{ series.color }}" stroke-width="2" {% if bar.coverage != 'complete' %}stroke-dasharray="4 3"{% endif %}/>
+            {% else %}<circle cx="{{ bar.x }}" cy="270" r="{{ series.width / 16 }}" fill="{{ series.color }}"/>{% endif %}
+          </g>
+          {% endif %}
+        {% endfor %}{% endfor %}
+        {% for bar in daily_graph.days %}<text x="{{ bar.x }}" y="295" text-anchor="middle" fill="#a3b4c6" font-size="12">{{ bar.label }}</text>{% endfor %}
+        <text x="50" y="14" fill="#a3b4c6" font-size="11">kWh</text>
+      </svg>
+    </div>
+    <p class="muted">House-only daily consumption is not yet available from a verified counter. It cannot safely be calculated as grid + solar minus eddi/zappi because battery flows and other loads also matter. Exact values and unavailable days are shown in the table below.</p>
+  </div>
+  <div class="card scroll"><table><thead><tr><th>UK date</th><th>Grid import</th><th>Solar</th><th>Battery charged</th><th>Battery discharged</th><th>Eddi consumed</th><th>Zappi delivered</th></tr></thead>
+    <tbody>{% for row in summary %}<tr><td>{{ row.day }}</td>{% for cell in row.cells %}<td>
+      {% if cell.value is not none %}{{ "%.3f"|format(cell.value) }}{% if cell.coverage != 'complete' %}*{% endif %}{% else %}&mdash;{% endif %}
+    </td>{% endfor %}</tr>{% endfor %}</tbody></table><p class="muted">* Partial / last observed total, not a finalized day. A dash means unavailable, not zero.</p></div>
+  <h2>Recorded trends &middot; {{ day }}</h2>
+  <p class="muted">Shaded areas show the cheap tariff window. Curves connect recorded samples, not continuous measurements. Gaps over 30 minutes are broken. Duracell mappings remain provisional until checked.</p>
+  <div class="grid charts">
+    {% for chart in charts %}<article class="card"><h3>{{ chart.source }} &middot; {{ chart.label }} ({{ chart.unit }})</h3>
+      <div class="axis"><span>{{ "%.1f"|format(chart.high) }} {{ chart.unit }}</span></div>
+      <svg viewBox="0 0 600 110" role="img" aria-label="{{ chart.label }} samples on {{ day }}">
+        {% for interval in tariff.intervals %}<rect x="{{ interval.left_pct * 6 }}" y="0" width="{{ interval.width_pct * 6 }}" height="110" fill="#244b45"/>{% endfor %}
+        {% for segment in chart.segments %}
+          <polyline points="{{ segment }}" fill="none" stroke="#5de0ad" stroke-width="2" vector-effect="non-scaling-stroke"/>
+          {% for point in segment.split(' ') %}<circle cx="{{ point.split(',')[0] }}" cy="{{ point.split(',')[1] }}" r="2" fill="#5de0ad"/>{% endfor %}
+        {% endfor %}
+      </svg>
+      <div class="axis"><span>{{ "%.1f"|format(chart.low) }} {{ chart.unit }} &middot; 00:00</span><span>UK local day end</span></div>
+    </article>{% else %}<p class="muted">No stored samples for this date.</p>{% endfor %}
+  </div>
+  <section class="health"><h2>Collection health</h2>
+    {% for item in health %}<div><strong>{{ item.source }}</strong> &middot; Last success: {{ item.last_success or 'never' }} (UTC)
+      {% if item.error %}<span class="warning"> &middot; {{ item.error }}</span>{% endif %}</div>
+    {% else %}<p class="muted">No energy collectors have reported. Duracell is opt-in via DURACELL_HOST; myenergi uses the existing service credentials.</p>{% endfor %}
+    <p class="muted">Battery state of charge is separate from sensor battery health. Grid import is not necessarily battery charging. Zappi delivered energy is charger output, not an EV battery SOC increase.</p>
+  </section>
+</main></body></html>

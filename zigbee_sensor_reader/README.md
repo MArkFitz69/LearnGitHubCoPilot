@@ -232,6 +232,150 @@ protocol/unit ID rather than scanning registers or altering settings. Automatic
 15-minute logging, battery SOC storage, energy counters and dashboard changes
 are deferred until the map is verified; existing history is untouched.
 
+## Energy dashboard and logging
+
+Open **`/energy`** (linked from the sensor dashboard), or use
+**`/api/energy?date=YYYY-MM-DD`** for JSON. The date selector and seven-day
+history use **Europe/London calendar days**, including 23/25-hour clock-change
+days. Latest cards always show the newest stored sample, not the selected
+historical date. Trends show the selected local day. Source timestamps are UTC.
+Page/API requests only read SQLite; they never contact the devices.
+
+A single seven-day bar graph overlays grid import and solar generation with
+house, eddi and zappi consumption on one shared kWh scale. Each column is a UK
+day; translucent, differently sized bars overlap rather than stack. Dashed
+outlines mark partial totals. House consumption remains unavailable until a
+reliable independent daily measure exists; it is not inferred from incomplete
+energy flows. Missing or unverified totals have no bar; a verified zero has a
+baseline marker. The exact-value history table remains underneath.
+
+The page separates:
+- Current grid exchange, battery power/SOC/voltage, both MPPT voltages, PV power,
+  grid-tied load and eddi/zappi power (W, V or %).
+- Daily grid import, solar generation, battery charge/discharge, eddi energy
+  consumed and zappi energy delivered (kWh).
+
+House battery SOC uses dedicated energy storage, **not** the sensor-health
+`battery_pct` field. Eddi/zappi daily values come from hourly device history,
+including diversion/charging and boost energy across phases/heaters, not `che`
+(which resets with sessions). Shared grid/PV readings are not summed across
+devices. EV energy delivered is not the car's battery SOC increase.
+
+Energy tables are added by schema migration 6 without rewriting old sensor
+history. New snapshots use UTC-aware timestamps; old local-naive sensor rows
+are not reinterpreted or backfilled. Energy snapshots are stored at
+`SENSOR_STORE_INTERVAL_SECONDS` (900 by default), **even if unchanged**.
+Intermediate power fluctuations do not bypass this energy snapshot interval.
+Collection health is updated on every poll, independently of stored snapshots.
+
+### Tariff timing
+
+The cheap window is fixed at **01:00 inclusive to 08:00 exclusive GMT/UTC**:
+normally 01:00-08:00 GMT in winter and 02:00-09:00 BST in summer. The dashboard
+converts those UTC instants for the selected UK date, including clock changes.
+It shows cheap/standard status now and shades the window in trends.
+No prices, costs, savings, or exact cheap/standard kWh splits are inferred:
+15-minute power/counter snapshots are insufficient for exact attribution.
+
+### Enabling collection (manual Pi deployment only)
+
+Back up the live database with SQLite's backup API rather than copying just
+the database while its WAL is active. Pick a new backup filename:
+
+```bash
+cd /home/admin/LearnGitHubCoPilot
+.venv/bin/python -c "import sqlite3; s=sqlite3.connect('sensor_data.db'); d=sqlite3.connect('sensor_data-before-energy.db'); s.backup(d); d.close(); s.close()"
+```
+
+After the new code has been published and pulled, install requirements in
+the service virtual environment. Preserve existing Hive/myenergi credentials.
+Add **only** the following opt-in settings through the service environment:
+
+```ini
+DURACELL_HOST=192.168.1.108
+DURACELL_PORT=502
+DURACELL_UNIT=1
+```
+
+The collector reads three bounded telemetry blocks over Modbus TCP. It never
+writes settings or scans units. Duracell failures are logged without stopping
+other sources. Disable local collection by removing `DURACELL_HOST`. Restart
+the collector to apply configuration/schema changes, and restart
+`sensor-data-api` if running the separate web service. No Home Assistant,
+Bluetooth connection, or inverter password is needed.
+
+The extended map includes MPPT voltages and daily counters but these **still
+need physical validation**:
+
+```bash
+.venv/bin/python -m zigbee_sensor_reader.duracell_diagnostic --host 192.168.1.108 --energy
+```
+
+Compare voltages and today's counters with Dura-i's live/statistics display,
+including a naturally occurring import/charge period and the midnight reset.
+Candidate daily addresses are PV 4135-4136 (u32 /1000 kWh), grid import
+4914-4915 (u32 /100 kWh), battery charge 8203-8204 and discharge 8207-8208
+(u32 /100 kWh); MPPT voltages are 4112/4116 (u16 /10 V). All register pairs
+are high word first. These follow the referenced Skyline source, not a
+manufacturer-certified Duracell map.
+
+**Do not enable verification flags merely because values look plausible.**
+All Duracell live measurements initially show **Provisional mapping**.
+Daily counters are recorded provisionally but displayed as **Unavailable**
+until explicitly validated. After individual metrics have been checked, list
+only those names in `DURACELL_VERIFIED_METRICS` (comma-separated):
+`grid_power_w`, `battery_power_w`, `battery_soc_pct`, `battery_voltage_v`,
+`pv_power_w`, `mppt1_voltage_v`, `mppt2_voltage_v`, `load_power_w`,
+`grid_import_kwh`, `solar_kwh`, `battery_charge_kwh`, `battery_discharge_kwh`.
+Daily counters additionally require
+`DURACELL_COUNTER_DAY_TIMEZONE=Europe/London` **only after** confirming their
+reset follows the UK day. Otherwise those counters cannot represent the
+requested UK daily totals. Verification changes apply to future observations,
+not previously provisional history.
+
+Counters are last-observed day-to-date values, not guaranteed midnight-final
+totals. Historical days stay labelled **partial** because the final minutes
+before reset may not have been captured. A counter decrease within the same
+UK day marks that day's metric invalid; it is not turned into consumption
+or silently repaired. No integration of power samples is used.
+
+### Verifying myenergi daily energy
+
+The existing private `MYENERGI_HUB_SERIAL` / `MYENERGI_API_KEY` settings
+enable live collection. Generate the key on the owner's myenergi Products
+page; it is **not** the app/account password. Do not commit or paste credentials.
+The reader follows only valid myenergi telemetry hostnames.
+
+Daily history is refreshed for today and yesterday at most once per 15 minutes
+per device. UTC hourly windows are converted to UK calendar days before summing.
+Energy fields `h1d/h1b` through `h3d/h3b` are joules, converted with
+`kWh = joules / 3600000`. This follows
+[pymyenergi's history implementation](https://github.com/CJNE/pymyenergi/blob/master/pymyenergi/base_device.py)
+and the community API documentation. Empty data, gaps and missing device-energy
+fields are not silently treated as a full day of zero use.
+
+For read-only comparison with the app's daily total, load the same private
+credentials into a shell without putting them in the command history. If using
+the dedicated root-only environment file described during setup, a one-off
+check can be run as follows (substitute a date and the correct device serial;
+zappi/eddi serials come from their respective device, not necessarily the hub):
+
+```bash
+sudo bash -c 'set -a; . /etc/zigbee-sensor-reader-myenergi.env; set +a; exec /home/admin/LearnGitHubCoPilot/.venv/bin/python -m zigbee_sensor_reader.myenergi_reader --history-date YYYY-MM-DD --kind zappi --serial DEVICE_SERIAL'
+```
+
+Repeat with `--kind eddi` and the eddi serial. This prints the candidate daily
+kWh and coverage without writing the database. Keep the environment file
+root-owned/mode 600; the above assumes it contains only trusted shell-compatible
+assignments. Do not run `env` or paste its contents.
+
+After confirming both the returned totals and UTC/UK day boundaries against
+the app, set `MYENERGI_HISTORY_VERIFIED=1` in the service environment. Until
+then candidate totals remain **Unavailable** in the UI. A missing hour yields
+a partial total, and a day still in progress is always partial. Duplicate
+polls replace daily history instead of adding it again. No older-day backfill
+or sensor-history thinning is performed.
+
 ## Commands
 
 ```bash

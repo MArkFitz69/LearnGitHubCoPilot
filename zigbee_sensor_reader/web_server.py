@@ -47,6 +47,8 @@ from .config import (
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+from .energy_dashboard import energy
+app.register_blueprint(energy)
 
 POWER_BI_PATH = "/api/readings?format=csv"
 DOWNLOAD_PATH = "/api/export/csv"
@@ -947,6 +949,7 @@ def dashboard():
 
   <div class="linkbar">
     <div class="pill"><a href="{{ download_url }}">&#128229; Download CSV</a></div>
+    <div class="pill"><a href="/energy">Energy dashboard</a></div>
     <div class="pill"><a href="/api/dashboard">&#128200; Dashboard JSON</a></div>
     <div class="pill"><a href="/api/readings/latest?format=csv">&#128196; Latest readings CSV</a></div>
     <div class="pill"><strong>Power BI URL:</strong> <span class="endpoint">{{ power_bi_url }}</span></div>
