@@ -170,7 +170,7 @@ class EnergyStoreTests(unittest.TestCase):
                 "grid_import_kwh", value, quality, coverage, "counter", NOW,
             )
         result = snapshot(self.conn, NOW.date(), NOW)
-        self.assertEqual(len(result["daily_graph"]["series"]), 5)
+        self.assertEqual(len(result["daily_graph"]["series"]), 6)
         bars = result["daily_graph"]["series"][0]["bars"]
         self.assertEqual(len(bars), 7)
         self.assertEqual([bar["day"] for bar in bars], [row["day"] for row in result["summary"]])
@@ -185,10 +185,10 @@ class EnergyStoreTests(unittest.TestCase):
         self.assertEqual(bars[6]["coverage"], "partial")
         with web_server.app.app_context():
             html = render_template("energy.html", **result)
-        self.assertIn('stroke-dasharray="4 3"', html)
+        self.assertIn("<path d=", html)
         self.assertIn("4.000 kWh, partial", html)
         self.assertIn("0.000 kWh, complete", html)
-        self.assertIn("House consumption &mdash; unavailable", html)
+        self.assertIn("Battery charged &mdash; unavailable", html)
         self.assertEqual(html.count('class="daily-energy-graph"'), 1)
 
     def test_daily_graph_all_missing_or_zero_has_safe_widths(self):
@@ -200,7 +200,7 @@ class EnergyStoreTests(unittest.TestCase):
         for series in result["daily_graph"]["series"]:
             self.assertTrue(all(bar["height"] == 0 for bar in series["bars"]))
 
-    def test_daily_overlays_share_scale_without_inventing_house_consumption(self):
+    def test_daily_overlays_share_scale_as_lines_without_inventing_house_consumption(self):
         for metric, value in (("grid_import_kwh", 4), ("solar_kwh", 8),
                               ("battery_charge_kwh", 100)):
             energy_data.store_daily(
@@ -213,12 +213,14 @@ class EnergyStoreTests(unittest.TestCase):
                 "device_kwh", value, "verified", "partial", "history", NOW,
             )
         graph = snapshot(self.conn, NOW.date(), NOW)["daily_graph"]
-        self.assertEqual(graph["maximum"], 8)
-        self.assertEqual([series["bars"][-1]["height"] for series in graph["series"]],
-                         [120, 240, 0, 60, 180])
+        self.assertEqual(graph["maximum"], 100)
+        heights = [series["bars"][-1]["height"] for series in graph["series"]]
+        for actual, expected in zip(heights, [9.6, 19.2, 240, 0, 4.8, 14.4]):
+            self.assertAlmostEqual(actual, expected)
         self.assertEqual(len({series["bars"][-1]["x"] for series in graph["series"]}), 1)
-        self.assertFalse(graph["series"][2]["available"])
-        self.assertTrue(all(bar["value"] is None for bar in graph["series"][2]["bars"]))
+        self.assertFalse(graph["series"][3]["available"])
+        self.assertEqual(graph["series"][3]["paths"], [])
+        self.assertNotIn("House consumption", [series["label"] for series in graph["series"]])
 
     def test_original_dashboard_stays_separate_and_links_to_energy(self):
         with tempfile.TemporaryDirectory() as folder:

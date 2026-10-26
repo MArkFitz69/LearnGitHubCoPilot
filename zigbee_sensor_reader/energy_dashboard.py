@@ -129,19 +129,20 @@ def snapshot(conn, day, now=None):
         for index, row in enumerate(summary)
     ]}
     for label, index, color, width in (
-        ("Grid import", 0, "#8ac9ff", 64),
-        ("Solar generation", 1, "#ffd166", 52),
-        ("House consumption", None, "#c9a0ff", 40),
-        ("Eddi consumption", 4, "#5de0ad", 28),
+        ("Grid imported", 0, "#8ac9ff", 64),
+        ("Solar generated", 1, "#ffd166", 52),
+        ("Battery charged", 2, "#7be495", 40),
+        ("Battery discharged", 3, "#ff9f6b", 40),
+        ("Eddi consumed", 4, "#5de0ad", 28),
         ("Zappi delivered", 5, "#ff91bc", 16),
     ):
         daily_graph["series"].append({
             "label": label, "color": color, "width": width,
             "bars": [{
                 **day_item,
-                "value": row["cells"][index]["plot_value"] if index is not None else None,
-                "verified": row["cells"][index]["verified"] if index is not None else False,
-                "coverage": row["cells"][index]["coverage"] if index is not None else "unavailable",
+                "value": row["cells"][index]["plot_value"],
+                "verified": row["cells"][index]["verified"],
+                "coverage": row["cells"][index]["coverage"],
             } for day_item, row in zip(daily_graph["days"], summary)],
         })
     maximum = max((
@@ -153,6 +154,16 @@ def snapshot(conn, day, now=None):
         series_item["available"] = any(bar["value"] is not None for bar in series_item["bars"])
         for bar in series_item["bars"]:
             bar["height"] = 240 * bar["value"] / daily_graph["maximum"] if bar["value"] is not None else 0
+            bar["y"] = 270 - bar["height"]
+        series_item["paths"] = []
+        run = []
+        for bar in series_item["bars"] + [{"value": None}]:
+            if bar["value"] is None:
+                if run:
+                    series_item["paths"].append(" ".join(run))
+                run = []
+            else:
+                run.append(f"{'L' if run else 'M'} {bar['x']} {bar['y']:.1f}")
 
     trend_rows = conn.execute("""
         SELECT * FROM energy_samples WHERE observed_at>=? AND observed_at<?

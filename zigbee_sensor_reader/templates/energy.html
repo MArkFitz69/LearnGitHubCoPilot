@@ -80,30 +80,29 @@
     </article>{% endfor %}
   </div>
   <h2>Seven-day history <span class="unit">(kWh)</span></h2>
-  <p class="muted">One day per column, with grid and solar supply overlaid by house, eddi and zappi consumption on the same kWh scale. Bars overlap, not stack; do not add them together. Dashed outlines indicate partial totals; dotted, fainter bars are recorded but unverified values. Missing values have no bar, not a zero reading.</p>
+  <p class="muted">One point per UK day for grid imported, solar generated, battery charged, battery discharged, eddi and zappi on the same kWh scale. Lines are not stacked and should not be added together. Hollow markers are partial or recorded-but-unverified totals. Missing days have no point, not a zero reading.</p>
   <div class="card">
     <div class="legend">{% for series in daily_graph.series %}<span><span class="swatch" style="--series-color:{{ series.color }}"></span>{{ series.label }}{% if not series.available %} &mdash; unavailable{% endif %}</span>{% endfor %}</div>
     <div class="scroll">
       <svg class="daily-energy-graph" viewBox="0 0 720 320" role="img" aria-labelledby="daily-graph-title daily-graph-description">
         <title id="daily-graph-title">Daily energy supply and consumption overlays (kWh)</title>
-        <desc id="daily-graph-description">Seven UK days on a shared scale. Wider bars show grid and solar; narrower bars overlay consumption. Dashed outlines mean partial. House consumption is unavailable until independently measured. Missing bars are not zero.</desc>
+        <desc id="daily-graph-description">Line graph of seven UK days on a shared kWh scale: grid imported, solar generated, battery charged and discharged, eddi and zappi. Hollow markers are partial or unverified. Missing points are not zero.</desc>
         {% for fraction in [0, 0.25, 0.5, 0.75, 1] %}
           <line x1="50" x2="680" y1="{{ 270 - fraction * 240 }}" y2="{{ 270 - fraction * 240 }}" stroke="#293b50"/>
           <text x="44" y="{{ 274 - fraction * 240 }}" text-anchor="end" fill="#a3b4c6" font-size="11">{{ "%.1f"|format(daily_graph.maximum * fraction) }}</text>
         {% endfor %}
-        {% for series in daily_graph.series %}{% for bar in series.bars %}
-          {% if bar.value is not none %}
+        {% for series in daily_graph.series %}
+          {% for path in series.paths %}{% if " L " in path %}<path d="{{ path }}" fill="none" stroke="{{ series.color }}" stroke-width="2.5"/>{% endif %}{% endfor %}
+          {% for bar in series.bars %}{% if bar.value is not none %}
           <g><title>{{ bar.day }}: {{ series.label }}, {{ "%.3f"|format(bar.value) }} kWh, {{ bar.coverage }}{% if not bar.verified %}, unverified{% endif %}</title>
-            {% if bar.value > 0 %}<rect x="{{ bar.x - series.width / 2 }}" y="{{ 270 - bar.height }}" width="{{ series.width }}" height="{{ bar.height }}" fill="{{ series.color }}" fill-opacity="0.2" stroke="{{ series.color }}" stroke-width="2" {% if not bar.verified %}stroke-dasharray="2 3"{% elif bar.coverage != 'complete' %}stroke-dasharray="4 3"{% endif %}/>
-            {% else %}<circle cx="{{ bar.x }}" cy="270" r="{{ series.width / 16 }}" fill="{{ series.color }}"/>{% endif %}
-          </g>
-          {% endif %}
-        {% endfor %}{% endfor %}
+            <circle cx="{{ bar.x }}" cy="{{ bar.y }}" r="4.5" fill="{% if bar.verified and bar.coverage == 'complete' %}{{ series.color }}{% else %}#0b1420{% endif %}" stroke="{{ series.color }}" stroke-width="2"/>
+          </g>{% endif %}{% endfor %}
+        {% endfor %}
         {% for bar in daily_graph.days %}<text x="{{ bar.x }}" y="295" text-anchor="middle" fill="#a3b4c6" font-size="12">{{ bar.label }}</text>{% endfor %}
         <text x="50" y="14" fill="#a3b4c6" font-size="11">kWh</text>
       </svg>
     </div>
-    <p class="muted">House-only daily consumption is not yet available from a verified counter. It cannot safely be calculated as grid + solar minus eddi/zappi because battery flows and other loads also matter. Exact values and unavailable days are shown in the table below.</p>
+    <p class="muted">Whole-house consumption is not shown because there is no verified counter for it and it cannot safely be derived without export figures. Exact values and unavailable days are shown in the table below.</p>
   </div>
   <div class="card scroll"><table><thead><tr><th>UK date</th><th>Grid import</th><th>Solar</th><th>Battery charged</th><th>Battery discharged</th><th>Eddi consumed</th><th>Zappi delivered</th></tr></thead>
     <tbody>{% for row in summary %}<tr><td>{{ row.day }}</td>{% for cell in row.cells %}<td>
