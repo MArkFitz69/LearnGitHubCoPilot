@@ -155,6 +155,83 @@ sudo ufw allow from 192.168.1.0/24 to any port 8080 proto tcp
 sudo ufw deny 8080/tcp
 ```
 
+## Duracell Dura-i G3: read-only local diagnostic
+
+This is an **experimental diagnostic**, not a production inverter reader.
+It does not run with the collector, open the sensor database, change inverter
+settings, or save measurements. No Home Assistant installation is needed.
+
+The target is the PD-DH1P-3.6K-G3. A successful connection to TCP port 502
+does not prove Modbus compatibility or validate the register map. The
+[Solar Assistant model page](https://solar-assistant.io/help/inverters/duracell/DH1P-G3)
+lists this exact model as connecting through `senergy`, but documents an RS485
+connection, not the inverter's native TCP interface.
+The [G3 community discussion](https://community.home-assistant.io/t/duracell-dura-i-g3-dura-5-battery/988204)
+reports both an RS485 adapter installation and a separate native TCP attempt.
+The related [mapping discussion](https://community.home-assistant.io/t/help-mapping-modbus-registers-for-dura-inverter-with-home-assistant/989077)
+contains conflicting addresses/scales, so these are **candidate interpretations**.
+Its Hoymiles/DTU example is for different US hardware, not proof for this G3.
+
+The diagnostic uses three small holding-register reads (function 03), sequentially,
+with unit ID 1, a three-second timeout per request and no retries or scans.
+It stops on the first failed/invalid response. Raw output includes local
+timestamps and zero-based protocol addresses in decimal and hex (not `4xxxx`
+reference-number notation).
+
+Candidate decoding follows
+[HA-Skyline controller.py at revision 43a3bd9](https://github.com/iPeel/HA-Skyline/blob/43a3bd9a098d5b902ee966d2e573f6e7dcdaff62/custom_components/cyg_skyline/controller.py):
+the battery/PV/grid blocks, high-word-first 32-bit power values, and conversion
+from deciwatts to watts. The integration expresses those power values in kW
+by dividing by 10000; this diagnostic divides by 10 for W.
+Battery voltage is also a candidate from the forum's 8198 mapping.
+No upstream control code or settings writes are used.
+
+| Candidate | Address(es), decimal | Interpretation to verify |
+|---|---|---|
+| Battery SOC | 8192 | unsigned 16-bit, % |
+| Battery voltage | 8198 | unsigned 16-bit, x 0.1 V |
+| Battery power | 8201-8202 | signed 32-bit, x 0.1 W; direction unverified |
+| MPPT1 power | 4114-4115 | unsigned 32-bit, x 0.1 W |
+| MPPT2 power | 4118-4119 | unsigned 32-bit, x 0.1 W |
+| Grid exchange | 4864-4865 | signed 32-bit, x 0.1 W; direction unverified |
+| Grid-tied load | 4874-4875 | signed 32-bit, x 0.1 W; excludes separate EPS load |
+
+All pairs use big-endian bytes and the most significant register first. These
+interpretations have **not been validated on a physical Duracell inverter**.
+Missing/error responses never become zero-valued measurements. Implausible SOC
+is flagged, and candidate values must not be used for energy accounting yet.
+
+Once this code is available on the Pi, install dependencies in its virtual
+environment and run a single snapshot manually:
+
+```bash
+cd /home/admin/LearnGitHubCoPilot
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m zigbee_sensor_reader.duracell_diagnostic --host 192.168.1.108
+```
+
+The default port is 502. `--unit` selects one unit (1-247), not a scan;
+change it only when the configured inverter unit is known. `--timeout`
+accepts values greater than zero and at most 10 seconds. No service restart,
+credentials, new hardware or inverter configuration changes are required.
+Avoid simultaneous third-party Modbus clients during the test: some gateways
+only support one connection.
+
+Compare each snapshot with **Dura-i's live Bluetooth view**, not the delayed
+cloud display. Record the time, SOC, PV power, battery charge/discharge power,
+grid import/export and load alongside the raw output. A repeated snapshot
+during naturally different conditions helps establish scaling and direction;
+do not change charging settings to force a test. Do not assume grid-tied load
+is whole-house demand when EPS/backup loads exist. Zero PV at night cannot
+validate its power scaling. Validate Dura16 SOC against its displayed value
+rather than assuming a different battery model's compatibility.
+
+Share the output and simultaneous app values without account credentials or
+device serials. A timeout or Modbus exception means stop and investigate the
+protocol/unit ID rather than scanning registers or altering settings. Automatic
+15-minute logging, battery SOC storage, energy counters and dashboard changes
+are deferred until the map is verified; existing history is untouched.
+
 ## Commands
 
 ```bash

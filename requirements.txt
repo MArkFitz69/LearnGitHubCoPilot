@@ -7,6 +7,9 @@ pyhive-integration>=1.0.10
 # myenergi zappi/eddi/harvi (digest-auth HTTP)
 requests>=2.28.0
 
+# Optional one-shot, read-only Duracell inverter diagnostic
+pymodbus>=3.11.0,<4.0
+
 # Shelly Blu H&T BLE sensor support
 bleak>=0.21.0
 
