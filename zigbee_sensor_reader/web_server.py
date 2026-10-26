@@ -1,4 +1,4 @@
-﻿"""
+"""
 Web API server for remote access to sensor data.
 
 Exposes the SQLite database via HTTP endpoints so Power BI, Excel,
@@ -910,14 +910,7 @@ def dashboard():
     """Simple web dashboard for current and daily sensor metrics."""
     conn = get_db()
     snapshot = _build_dashboard_snapshot(conn)
-    from .energy_dashboard import snapshot as energy_snapshot, requested_day
-    try:
-        energy_data = energy_snapshot(conn, requested_day())
-    except ValueError as exc:
-        conn.close()
-        return str(exc), 400
     conn.close()
-    snapshot["energy_html"] = render_template("energy.html", embedded=True, **energy_data)
 
     html = """
 <!doctype html>
@@ -956,13 +949,12 @@ def dashboard():
 
   <div class="linkbar">
     <div class="pill"><a href="{{ download_url }}">&#128229; Download CSV</a></div>
-    <div class="pill"><a href="#home-energy">Energy</a></div>
+    <div class="pill"><a href="/energy">&#9889; Energy</a></div>
     <div class="pill"><a href="/api/dashboard">&#128200; Dashboard JSON</a></div>
     <div class="pill"><a href="/api/readings/latest?format=csv">&#128196; Latest readings CSV</a></div>
     <div class="pill"><strong>Power BI URL:</strong> <span class="endpoint">{{ power_bi_url }}</span></div>
   </div>
 
-  <section id="home-energy">{{ energy_html|safe }}</section>
   <h2>Sonoff Sensors (SNZB-02D / SNZB-02DR2)</h2>
   <table>
     <thead>
