@@ -148,8 +148,8 @@ class EnergyStoreTests(unittest.TestCase):
                 "device_kwh", value, "verified", "complete", "history", NOW,
             )
         result = snapshot(self.conn, NOW.date(), NOW)
-        self.assertEqual(result["summary"][-1]["cells"][-2]["value"], 2)
-        self.assertEqual(result["summary"][-1]["cells"][-1]["value"], 10)
+        self.assertEqual(result["summary"][-1]["cells"][4]["value"], 2)
+        self.assertEqual(result["summary"][-1]["cells"][5]["value"], 10)
 
     def test_trend_gaps_are_not_joined(self):
         for minutes in (0, 15, 90):
@@ -170,7 +170,7 @@ class EnergyStoreTests(unittest.TestCase):
                 "grid_import_kwh", value, quality, coverage, "counter", NOW,
             )
         result = snapshot(self.conn, NOW.date(), NOW)
-        self.assertEqual(len(result["daily_graph"]["series"]), 6)
+        self.assertEqual(len(result["daily_graph"]["series"]), 7)
         bars = result["daily_graph"]["series"][0]["bars"]
         self.assertEqual(len(bars), 7)
         self.assertEqual([bar["day"] for bar in bars], [row["day"] for row in result["summary"]])
@@ -185,7 +185,7 @@ class EnergyStoreTests(unittest.TestCase):
         self.assertEqual(bars[6]["coverage"], "partial")
         with web_server.app.app_context():
             html = render_template("energy.html", **result)
-        self.assertIn("<path d=", html)
+        self.assertIn("stroke-dasharray=\"4 3\"", html)
         self.assertIn("4.000 kWh, partial", html)
         self.assertIn("0.000 kWh, complete", html)
         self.assertIn("Battery charged &mdash; unavailable", html)
@@ -215,12 +215,47 @@ class EnergyStoreTests(unittest.TestCase):
         graph = snapshot(self.conn, NOW.date(), NOW)["daily_graph"]
         self.assertEqual(graph["maximum"], 100)
         heights = [series["bars"][-1]["height"] for series in graph["series"]]
-        for actual, expected in zip(heights, [9.6, 19.2, 240, 0, 4.8, 14.4]):
+        for actual, expected in zip(heights, [9.6, 19.2, 0, 240, 0, 4.8, 14.4]):
             self.assertAlmostEqual(actual, expected)
         self.assertEqual(len({series["bars"][-1]["x"] for series in graph["series"]}), 1)
-        self.assertFalse(graph["series"][3]["available"])
-        self.assertEqual(graph["series"][3]["paths"], [])
-        self.assertNotIn("House consumption", [series["label"] for series in graph["series"]])
+        self.assertFalse(graph["series"][2]["available"])
+        self.assertFalse(graph["series"][4]["available"])
+        self.assertTrue(all(bar["value"] is None for bar in graph["series"][4]["bars"]))
+
+    def test_house_is_derived_only_from_complete_inputs(self):
+        for metric, value in (("grid_import_kwh", 10), ("solar_kwh", 20),
+                              ("battery_charge_kwh", 8), ("battery_discharge_kwh", 5)):
+            energy_data.store_daily(
+                self.conn, "duracell", "inverter", NOW.date(),
+                metric, value, "verified", "complete", "counter", NOW,
+            )
+        result = snapshot(self.conn, NOW.date(), NOW)
+        self.assertIsNone(result["summary"][-1]["cells"][6]["plot_value"])
+        for kind, value in (("eddi", 3), ("zappi", 4)):
+            energy_data.store_daily(
+                self.conn, "myenergi", f"myenergi:{kind}:1", NOW.date(),
+                "device_kwh", value, "verified", "complete", "history", NOW,
+            )
+        cell = snapshot(self.conn, NOW.date(), NOW)["summary"][-1]["cells"][6]
+        self.assertEqual(cell["plot_value"], 10 + 20 + 5 - 8 - 3 - 4)
+        self.assertFalse(cell["verified"])
+
+    def test_day_line_graph_derives_house_power_per_slot(self):
+        start, end = energy_data.day_bounds(NOW.date())
+        when = start + timedelta(hours=10)
+        energy_data.store_sample(
+            self.conn, "duracell", "inverter",
+            {"grid_power_w": 500, "pv_power_w": 1000, "battery_power_w": 200},
+                        {"grid_power_w": "provisional", "pv_power_w": "provisional",
+                         "battery_power_w": "provisional"}, when)
+        energy_data.store_sample(
+            self.conn, "myenergi", "myenergi:eddi:1", {"device_power_w": 300}, {"device_power_w": "verified"}, when)
+        energy_data.store_sample(
+            self.conn, "myenergi", "myenergi:zappi:1", {"device_power_w": 400}, {"device_power_w": "verified"}, when)
+        graph = snapshot(self.conn, NOW.date(), NOW)["day_graph"]
+        house = [s for s in graph["series"] if s["label"] == "House (derived)"][0]
+        self.assertEqual(house["segments"][0]["points"][0]["value"], 1000)
+        self.assertTrue(graph["has_data"])
 
     def test_original_dashboard_stays_separate_and_links_to_energy(self):
         with tempfile.TemporaryDirectory() as folder:

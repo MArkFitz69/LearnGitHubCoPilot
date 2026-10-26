@@ -6,6 +6,7 @@ import json
 from flask import Blueprint, jsonify, render_template, request
 
 from .energy_data import DAILY_METRICS, LIVE_METRICS, LONDON, day_bounds, tariff_context, utc_now
+from .energy_graph import build_day_graph
 
 energy = Blueprint("energy", __name__)
 
@@ -121,6 +122,19 @@ def snapshot(conn, day, now=None):
                     item["coverage"] == "complete" for item in matches
                 ) else "partial",
             })
+        parts = cells[:6]
+        known = all(part["plot_value"] is not None for part in parts)
+        house = (
+            parts[0]["plot_value"] + parts[1]["plot_value"] + parts[3]["plot_value"]
+            - parts[2]["plot_value"] - parts[4]["plot_value"] - parts[5]["plot_value"]
+        ) if known else None
+        if house is not None and house < 0:
+            house = None
+        cells.append({
+            "plot_value": house, "value": None, "verified": False,
+            "coverage": "unavailable" if house is None else (
+                "complete" if all(part["coverage"] == "complete" for part in parts) else "partial"),
+        })
         summary.append({"day": selected.isoformat(), "cells": cells})
 
     daily_graph = {"series": [], "days": [
@@ -129,12 +143,13 @@ def snapshot(conn, day, now=None):
         for index, row in enumerate(summary)
     ]}
     for label, index, color, width in (
-        ("Grid imported", 0, "#8ac9ff", 64),
-        ("Solar generated", 1, "#ffd166", 52),
-        ("Battery charged", 2, "#7be495", 40),
-        ("Battery discharged", 3, "#ff9f6b", 40),
-        ("Eddi consumed", 4, "#5de0ad", 28),
-        ("Zappi delivered", 5, "#ff91bc", 16),
+        ("Grid imported", 0, "#8ac9ff", 74),
+        ("Solar generated", 1, "#ffd166", 64),
+        ("Battery discharged", 3, "#ff9f6b", 54),
+        ("Battery charged", 2, "#7be495", 44),
+        ("House (derived)", 6, "#c9a0ff", 34),
+        ("Eddi consumed", 4, "#5de0ad", 24),
+        ("Zappi delivered", 5, "#ff91bc", 14),
     ):
         daily_graph["series"].append({
             "label": label, "color": color, "width": width,
@@ -201,6 +216,7 @@ def snapshot(conn, day, now=None):
             "segments": segments, "points": points,
         })
     return {
+        "day_graph": build_day_graph(trend_rows, start, end, tariff_context(now, day)),
         "day": day.isoformat(), "timezone": "Europe/London",
         "generated_at": now.isoformat(timespec="seconds"), "ready": ready,
         "live": live, "missing_live": missing_live, "daily": daily,

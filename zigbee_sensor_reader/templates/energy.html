@@ -80,35 +80,53 @@
     </article>{% endfor %}
   </div>
   <h2>Seven-day history <span class="unit">(kWh)</span></h2>
-  <p class="muted">One point per UK day for grid imported, solar generated, battery charged, battery discharged, eddi and zappi on the same kWh scale. Lines are not stacked and should not be added together. Hollow markers are partial or recorded-but-unverified totals. Missing days have no point, not a zero reading.</p>
+  <p class="muted">One column per UK day. Grid imported, solar generated, battery discharged and charged, derived house use, eddi and zappi are overlaid on the same kWh scale; bars overlap, so do not add them together. Dashed outlines are partial or unverified totals. A missing bar means unavailable, not zero.</p>
   <div class="card">
     <div class="legend">{% for series in daily_graph.series %}<span><span class="swatch" style="--series-color:{{ series.color }}"></span>{{ series.label }}{% if not series.available %} &mdash; unavailable{% endif %}</span>{% endfor %}</div>
     <div class="scroll">
       <svg class="daily-energy-graph" viewBox="0 0 720 320" role="img" aria-labelledby="daily-graph-title daily-graph-description">
-        <title id="daily-graph-title">Daily energy supply and consumption overlays (kWh)</title>
-        <desc id="daily-graph-description">Line graph of seven UK days on a shared kWh scale: grid imported, solar generated, battery charged and discharged, eddi and zappi. Hollow markers are partial or unverified. Missing points are not zero.</desc>
+        <title id="daily-graph-title">Seven-day energy bar graph (kWh)</title>
+        <desc id="daily-graph-description">Seven UK days on a shared scale. Overlaid bars show grid import, solar, battery discharge and charge, derived house use, eddi and zappi. Dashed outlines mean partial or unverified. Missing bars are not zero.</desc>
         {% for fraction in [0, 0.25, 0.5, 0.75, 1] %}
           <line x1="50" x2="680" y1="{{ 270 - fraction * 240 }}" y2="{{ 270 - fraction * 240 }}" stroke="#293b50"/>
           <text x="44" y="{{ 274 - fraction * 240 }}" text-anchor="end" fill="#a3b4c6" font-size="11">{{ "%.1f"|format(daily_graph.maximum * fraction) }}</text>
         {% endfor %}
-        {% for series in daily_graph.series %}
-          {% for path in series.paths %}{% if " L " in path %}<path d="{{ path }}" fill="none" stroke="{{ series.color }}" stroke-width="2.5"/>{% endif %}{% endfor %}
-          {% for bar in series.bars %}{% if bar.value is not none %}
+        {% for series in daily_graph.series %}{% for bar in series.bars %}
+          {% if bar.value is not none %}
           <g><title>{{ bar.day }}: {{ series.label }}, {{ "%.3f"|format(bar.value) }} kWh, {{ bar.coverage }}{% if not bar.verified %}, unverified{% endif %}</title>
-            <circle cx="{{ bar.x }}" cy="{{ bar.y }}" r="4.5" fill="{% if bar.verified and bar.coverage == 'complete' %}{{ series.color }}{% else %}#0b1420{% endif %}" stroke="{{ series.color }}" stroke-width="2"/>
-          </g>{% endif %}{% endfor %}
-        {% endfor %}
+            {% if bar.value > 0 %}<rect x="{{ bar.x - series.width / 2 }}" y="{{ bar.y }}" width="{{ series.width }}" height="{{ bar.height }}" fill="{{ series.color }}" fill-opacity="0.2" stroke="{{ series.color }}" stroke-width="2" {% if bar.coverage != 'complete' or not bar.verified %}stroke-dasharray="4 3"{% endif %}/>
+            {% else %}<circle cx="{{ bar.x }}" cy="270" r="{{ series.width / 16 }}" fill="{{ series.color }}"/>{% endif %}
+          </g>
+          {% endif %}
+        {% endfor %}{% endfor %}
         {% for bar in daily_graph.days %}<text x="{{ bar.x }}" y="295" text-anchor="middle" fill="#a3b4c6" font-size="12">{{ bar.label }}</text>{% endfor %}
         <text x="50" y="14" fill="#a3b4c6" font-size="11">kWh</text>
       </svg>
     </div>
-    <p class="muted">Whole-house consumption is not shown because there is no verified counter for it and it cannot safely be derived without export figures. Exact values and unavailable days are shown in the table below.</p>
+    <p class="muted">House (derived) = grid imported + solar generated + battery discharged &minus; battery charged &minus; eddi &minus; zappi. Grid export is not measured, so it is only exact while nothing is exported. It is shown only when all six inputs exist for the day.</p>
   </div>
-  <div class="card scroll"><table><thead><tr><th>UK date</th><th>Grid import</th><th>Solar</th><th>Battery charged</th><th>Battery discharged</th><th>Eddi consumed</th><th>Zappi delivered</th></tr></thead>
+  <div class="card scroll"><table><thead><tr><th>UK date</th><th>Grid import</th><th>Solar</th><th>Battery charged</th><th>Battery discharged</th><th>Eddi consumed</th><th>Zappi delivered</th><th>House (derived)</th></tr></thead>
     <tbody>{% for row in summary %}<tr><td>{{ row.day }}</td>{% for cell in row.cells %}<td>
-      {% if cell.value is not none %}{{ "%.3f"|format(cell.value) }}{% if cell.coverage != 'complete' %}*{% endif %}{% else %}&mdash;{% endif %}
-    </td>{% endfor %}</tr>{% endfor %}</tbody></table><p class="muted">* Partial / last observed total, not a finalized day. A dash means unavailable, not zero.</p></div>
-  <h2>Recorded trends &middot; {{ day }}</h2>
+      {% if cell.value is not none %}{{ "%.3f"|format(cell.value) }}{% if cell.coverage != 'complete' %}*{% endif %}{% elif cell.plot_value is not none %}{{ "%.3f"|format(cell.plot_value) }}{% if loop.last %}~{% else %}?{% endif %}{% else %}&mdash;{% endif %}
+    </td>{% endfor %}</tr>{% endfor %}</tbody></table><p class="muted">* Partial / last observed total. ? recorded but unverified. ~ derived estimate. A dash means unavailable, not zero.</p></div>
+  <h2>Selected day power &middot; {{ day }}</h2>
+  <p class="muted">Line graph of power through the day (latest recorded reading in each 15-minute slot; gaps are broken, not joined). Shaded area is the cheap tariff window. House (derived) = grid import + solar + battery discharge &minus; eddi &minus; zappi.</p>
+  <div class="card">
+    <div class="legend">{% for series in day_graph.series %}<span><span class="swatch" style="--series-color:{{ series.color }}"></span>{{ series.label }}{% if not series.available %} &mdash; no data{% endif %}</span>{% endfor %}</div>
+    {% if day_graph.has_data %}<div class="scroll">
+      <svg class="daily-energy-graph" viewBox="0 0 720 320" role="img" aria-label="Power through {{ day }} in watts">
+        {% for item in day_graph.cheap %}<rect x="{{ item.x }}" y="30" width="{{ item.width }}" height="240" fill="#244b45" fill-opacity="0.6"/>{% endfor %}
+        {% for tick in day_graph.ticks %}<line x1="50" x2="680" y1="{{ tick.y }}" y2="{{ tick.y }}" stroke="#293b50"/><text x="44" y="{{ tick.y + 4 }}" text-anchor="end" fill="#a3b4c6" font-size="11">{{ "%.0f"|format(tick.value) }}</text>{% endfor %}
+        {% if day_graph.low < 0 %}<line x1="50" x2="680" y1="{{ day_graph.zero_y }}" y2="{{ day_graph.zero_y }}" stroke="#5b6f86" stroke-dasharray="3 3"/>{% endif %}
+        {% for series in day_graph.series %}{% for segment in series.segments %}
+          {% if segment.points|length > 1 %}<path d="{{ segment.path }}" fill="none" stroke="{{ series.color }}" stroke-width="2"/>{% endif %}
+          {% for point in segment.points %}<circle cx="{{ point.x }}" cy="{{ point.y }}" r="{% if segment.points|length > 1 %}2{% else %}3.5{% endif %}" fill="{{ series.color }}"><title>{{ point.time }} {{ series.label }}: {{ "%.0f"|format(point.value) }} W</title></circle>{% endfor %}
+        {% endfor %}{% endfor %}
+        {% for hour in day_graph.hours %}<text x="{{ hour.x }}" y="295" text-anchor="middle" fill="#a3b4c6" font-size="12">{{ hour.label }}</text>{% endfor %}
+        <text x="50" y="14" fill="#a3b4c6" font-size="11">Watts</text>
+      </svg>
+    </div>{% else %}<p class="muted">No stored power samples for this date.</p>{% endif %}
+  </div>  <h2>Recorded trends &middot; {{ day }}</h2>
   <p class="muted">Shaded areas show the cheap tariff window. Curves connect recorded samples, not continuous measurements. Gaps over 30 minutes are broken. Duracell mappings remain provisional until checked.</p>
   <div class="grid charts">
     {% for chart in charts %}<article class="card"><h3>{{ chart.source }} &middot; {{ chart.label }} ({{ chart.unit }})</h3>
