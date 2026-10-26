@@ -79,6 +79,24 @@
       {% if item.updated_at %}<p class="muted">Counter/history updated {{ item.updated_at }} (UTC)</p>{% endif %}
     </article>{% endfor %}
   </div>
+  <h2>Daily power (line graph) &middot; {{ day }}</h2>
+  <p class="muted">Line graph of power through the day (latest recorded reading in each 15-minute slot; gaps are broken, not joined). Shaded area is the cheap tariff window. House (derived) = grid import + solar + battery discharge &minus; eddi &minus; zappi.</p>
+  <div class="card">
+    <div class="legend">{% for series in day_graph.series %}<span><span class="swatch" style="--series-color:{{ series.color }}"></span>{{ series.label }}{% if not series.available %} &mdash; no data{% endif %}</span>{% endfor %}</div>
+    {% if day_graph.has_data %}<div class="scroll">
+      <svg class="daily-energy-graph" viewBox="0 0 720 320" role="img" aria-label="Power through {{ day }} in watts">
+        {% for item in day_graph.cheap %}<rect x="{{ item.x }}" y="30" width="{{ item.width }}" height="240" fill="#244b45" fill-opacity="0.6"/>{% endfor %}
+        {% for tick in day_graph.ticks %}<line x1="50" x2="680" y1="{{ tick.y }}" y2="{{ tick.y }}" stroke="#293b50"/><text x="44" y="{{ tick.y + 4 }}" text-anchor="end" fill="#a3b4c6" font-size="11">{{ "%.0f"|format(tick.value) }}</text>{% endfor %}
+        {% if day_graph.low < 0 %}<line x1="50" x2="680" y1="{{ day_graph.zero_y }}" y2="{{ day_graph.zero_y }}" stroke="#5b6f86" stroke-dasharray="3 3"/>{% endif %}
+        {% for series in day_graph.series %}{% for segment in series.segments %}
+          {% if segment.points|length > 1 %}<path d="{{ segment.path }}" fill="none" stroke="{{ series.color }}" stroke-width="2"/>{% endif %}
+          {% for point in segment.points %}<circle cx="{{ point.x }}" cy="{{ point.y }}" r="{% if segment.points|length > 1 %}2{% else %}3.5{% endif %}" fill="{{ series.color }}"><title>{{ point.time }} {{ series.label }}: {{ "%.0f"|format(point.value) }} W</title></circle>{% endfor %}
+        {% endfor %}{% endfor %}
+        {% for hour in day_graph.hours %}<text x="{{ hour.x }}" y="295" text-anchor="middle" fill="#a3b4c6" font-size="12">{{ hour.label }}</text>{% endfor %}
+        <text x="50" y="14" fill="#a3b4c6" font-size="11">Watts</text>
+      </svg>
+    </div>{% else %}<p class="muted">No stored power samples for this date.</p>{% endif %}
+  </div>
   <h2>Seven-day history <span class="unit">(kWh)</span></h2>
   <p class="muted">One column per UK day. Grid imported, solar generated, battery discharged and charged, derived house use, eddi and zappi are overlaid on the same kWh scale; bars overlap, so do not add them together. Dashed outlines are partial or unverified totals. A missing bar means unavailable, not zero.</p>
   <div class="card">
@@ -109,24 +127,7 @@
     <tbody>{% for row in summary %}<tr><td>{{ row.day }}</td>{% for cell in row.cells %}<td>
       {% if cell.value is not none %}{{ "%.3f"|format(cell.value) }}{% if cell.coverage != 'complete' %}*{% endif %}{% elif cell.plot_value is not none %}{{ "%.3f"|format(cell.plot_value) }}{% if loop.last %}~{% else %}?{% endif %}{% else %}&mdash;{% endif %}
     </td>{% endfor %}</tr>{% endfor %}</tbody></table><p class="muted">* Partial / last observed total. ? recorded but unverified. ~ derived estimate. A dash means unavailable, not zero.</p></div>
-  <h2>Selected day power &middot; {{ day }}</h2>
-  <p class="muted">Line graph of power through the day (latest recorded reading in each 15-minute slot; gaps are broken, not joined). Shaded area is the cheap tariff window. House (derived) = grid import + solar + battery discharge &minus; eddi &minus; zappi.</p>
-  <div class="card">
-    <div class="legend">{% for series in day_graph.series %}<span><span class="swatch" style="--series-color:{{ series.color }}"></span>{{ series.label }}{% if not series.available %} &mdash; no data{% endif %}</span>{% endfor %}</div>
-    {% if day_graph.has_data %}<div class="scroll">
-      <svg class="daily-energy-graph" viewBox="0 0 720 320" role="img" aria-label="Power through {{ day }} in watts">
-        {% for item in day_graph.cheap %}<rect x="{{ item.x }}" y="30" width="{{ item.width }}" height="240" fill="#244b45" fill-opacity="0.6"/>{% endfor %}
-        {% for tick in day_graph.ticks %}<line x1="50" x2="680" y1="{{ tick.y }}" y2="{{ tick.y }}" stroke="#293b50"/><text x="44" y="{{ tick.y + 4 }}" text-anchor="end" fill="#a3b4c6" font-size="11">{{ "%.0f"|format(tick.value) }}</text>{% endfor %}
-        {% if day_graph.low < 0 %}<line x1="50" x2="680" y1="{{ day_graph.zero_y }}" y2="{{ day_graph.zero_y }}" stroke="#5b6f86" stroke-dasharray="3 3"/>{% endif %}
-        {% for series in day_graph.series %}{% for segment in series.segments %}
-          {% if segment.points|length > 1 %}<path d="{{ segment.path }}" fill="none" stroke="{{ series.color }}" stroke-width="2"/>{% endif %}
-          {% for point in segment.points %}<circle cx="{{ point.x }}" cy="{{ point.y }}" r="{% if segment.points|length > 1 %}2{% else %}3.5{% endif %}" fill="{{ series.color }}"><title>{{ point.time }} {{ series.label }}: {{ "%.0f"|format(point.value) }} W</title></circle>{% endfor %}
-        {% endfor %}{% endfor %}
-        {% for hour in day_graph.hours %}<text x="{{ hour.x }}" y="295" text-anchor="middle" fill="#a3b4c6" font-size="12">{{ hour.label }}</text>{% endfor %}
-        <text x="50" y="14" fill="#a3b4c6" font-size="11">Watts</text>
-      </svg>
-    </div>{% else %}<p class="muted">No stored power samples for this date.</p>{% endif %}
-  </div>  <h2>Recorded trends &middot; {{ day }}</h2>
+  <h2>Recorded trends &middot; {{ day }}</h2>
   <p class="muted">Shaded areas show the cheap tariff window. Curves connect recorded samples, not continuous measurements. Gaps over 30 minutes are broken. Duracell mappings remain provisional until checked.</p>
   <div class="grid charts">
     {% for chart in charts %}<article class="card"><h3>{{ chart.source }} &middot; {{ chart.label }} ({{ chart.unit }})</h3>
