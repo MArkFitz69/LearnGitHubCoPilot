@@ -4,6 +4,9 @@ openpyxl>=3.1.0
 # Hive thermostat integration
 pyhive-integration>=1.0.10
 
+# myenergi zappi/eddi/harvi (digest-auth HTTP)
+requests>=2.28.0
+
 # Shelly Blu H&T BLE sensor support
 bleak>=0.21.0
 

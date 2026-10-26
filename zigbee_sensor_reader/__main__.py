@@ -237,6 +237,16 @@ async def run_collector() -> None:
             except Exception as exc:
                 logger.warning("Hive poll failed: %s", exc)
             try:
+                from .myenergi_reader import (
+                    MYENERGI_API_KEY,
+                    MYENERGI_HUB_SERIAL,
+                    poll_myenergi,
+                )
+                if MYENERGI_HUB_SERIAL and MYENERGI_API_KEY:
+                    await poll_myenergi()
+            except Exception as exc:
+                logger.warning("myenergi poll failed: %r", exc)
+            try:
                 from .config import SHELLY_SCAN_DURATION
                 from .shelly_ble_reader import poll_shelly_ble
                 await poll_shelly_ble(scan_duration=SHELLY_SCAN_DURATION)

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest import mock
 from datetime import datetime, timedelta
 
-from zigbee_sensor_reader import database, export, hive_reader, web_server
+from zigbee_sensor_reader import database, export, hive_reader, myenergi_reader, web_server
 from zigbee_sensor_reader.__main__ import handle_reading, main
 from zigbee_sensor_reader.database import (
     get_connection,
@@ -1140,6 +1140,50 @@ class Z2MZonePersistenceTests(unittest.TestCase):
         }
         self.assertIsNone(sensors["Cinema Sensor"])
         self.assertIsNone(sensors["Hive Plug"])
+
+
+class MyEnergiReaderTests(unittest.TestCase):
+    PAYLOAD = [
+        {"eddi": [{"sno": 10088888, "sta": 3, "div": 900, "che": 1.5,
+                   "tp1": 50, "grd": -200, "gen": 2000}]},
+        {"zappi": [{"sno": 10077777, "pst": "C2", "zmo": 2, "div": 3600,
+                    "che": 7.2, "grd": 10, "gen": 4000}]},
+        {"harvi": [{"sno": 10066666, "ectp1": 176, "ectt1": "Grid"}]},
+        {"asn": "s18.myenergi.net"},
+    ]
+
+    def test_parse_status_maps_devices_and_site_totals(self):
+        by_id = {r["ieee_address"]: r for r in myenergi_reader.parse_status(self.PAYLOAD)}
+        self.assertEqual(by_id["myenergi:zappi:10077777"]["state"], "C2")
+        self.assertEqual(by_id["myenergi:zappi:10077777"]["heating_mode"], "ECO")
+        self.assertEqual(by_id["myenergi:zappi:10077777"]["power_w"], 3600.0)
+        self.assertEqual(by_id["myenergi:eddi:10088888"]["state"], "DIVERTING")
+        self.assertEqual(by_id["myenergi:eddi:10088888"]["temperature_c"], 50.0)
+        self.assertEqual(by_id["myenergi:harvi:10066666"]["power_w"], 176.0)
+        self.assertEqual(by_id["myenergi:grd"]["power_w"], -200.0)
+        self.assertEqual(by_id["myenergi:gen"]["power_w"], 2000.0)
+        self.assertEqual(len(by_id), 5)
+
+    def test_parse_status_tolerates_empty_and_malformed(self):
+        self.assertEqual(myenergi_reader.parse_status([{"harvi": []}, "x", {}]), [])
+
+    def test_store_readings_writes_throttled_rows(self):
+        tmp = tempfile.TemporaryDirectory()
+        original = database.DATABASE_PATH
+        database.DATABASE_PATH = os.path.join(tmp.name, "t.db")
+        try:
+            readings = myenergi_reader.parse_status(self.PAYLOAD)
+            myenergi_reader.store_myenergi_readings(readings)
+            myenergi_reader.store_myenergi_readings(readings)
+            conn = get_connection()
+            count = conn.execute(
+                "SELECT COUNT(*) FROM readings WHERE ieee_address LIKE 'myenergi:%'"
+            ).fetchone()[0]
+            conn.close()
+            self.assertEqual(count, 5)
+        finally:
+            database.DATABASE_PATH = original
+            tmp.cleanup()
 
 
 if __name__ == "__main__":

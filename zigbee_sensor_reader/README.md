@@ -86,6 +86,9 @@ Core environment:
 ```bash
 export HIVE_USERNAME=your-email@example.com
 export HIVE_PASSWORD=your-hive-secret
+export MYENERGI_HUB_SERIAL=your-hub-serial   # optional: zappi/eddi/harvi
+export MYENERGI_API_KEY=your-hub-password    # set in the myenergi app
+export SENSOR_STORE_INTERVAL_SECONDS=900     # max one stored row per sensor per interval
 export Z2M_MQTT_HOST=home-logger
 export Z2M_MQTT_PORT=8081
 export Z2M_MQTT_TRANSPORT=websockets
