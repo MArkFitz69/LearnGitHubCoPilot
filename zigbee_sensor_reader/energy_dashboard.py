@@ -70,6 +70,7 @@ def snapshot(conn, day, now=None):
             "source": source, "device": device_name(source, device), "metric": metric,
             "label": DAILY_METRICS[metric],
             "value": row["value"] if verified else None, "unit": "kWh",
+            "plot_value": row["value"] if row else None, "verified": verified,
             "quality": row["quality"] if row else "unavailable",
             "coverage": row["coverage"] if row else "unavailable",
             "reason": row["reason"] if row else "No verified device counter/history received",
@@ -111,7 +112,10 @@ def snapshot(conn, day, now=None):
                 for s, d in history_devices if f":{kind}:" in d
             ]
             available = matches and all(item["value"] is not None for item in matches)
+            plottable = bool(matches) and all(item["plot_value"] is not None for item in matches)
             cells.append({
+                "plot_value": sum(item["plot_value"] for item in matches) if plottable else None,
+                "verified": bool(available),
                 "value": sum(item["value"] for item in matches) if available else None,
                 "coverage": "complete" if available and all(
                     item["coverage"] == "complete" for item in matches
@@ -135,7 +139,8 @@ def snapshot(conn, day, now=None):
             "label": label, "color": color, "width": width,
             "bars": [{
                 **day_item,
-                "value": row["cells"][index]["value"] if index is not None else None,
+                "value": row["cells"][index]["plot_value"] if index is not None else None,
+                "verified": row["cells"][index]["verified"] if index is not None else False,
                 "coverage": row["cells"][index]["coverage"] if index is not None else "unavailable",
             } for day_item, row in zip(daily_graph["days"], summary)],
         })

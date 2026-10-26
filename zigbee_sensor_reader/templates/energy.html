@@ -80,7 +80,7 @@
     </article>{% endfor %}
   </div>
   <h2>Seven-day history <span class="unit">(kWh)</span></h2>
-  <p class="muted">One day per column, with grid and solar supply overlaid by house, eddi and zappi consumption on the same kWh scale. Bars overlap, not stack; do not add them together. Dashed outlines indicate partial totals. Missing values have no bar, not a zero reading.</p>
+  <p class="muted">One day per column, with grid and solar supply overlaid by house, eddi and zappi consumption on the same kWh scale. Bars overlap, not stack; do not add them together. Dashed outlines indicate partial totals; dotted, fainter bars are recorded but unverified values. Missing values have no bar, not a zero reading.</p>
   <div class="card">
     <div class="legend">{% for series in daily_graph.series %}<span><span class="swatch" style="--series-color:{{ series.color }}"></span>{{ series.label }}{% if not series.available %} &mdash; unavailable{% endif %}</span>{% endfor %}</div>
     <div class="scroll">
@@ -93,8 +93,8 @@
         {% endfor %}
         {% for series in daily_graph.series %}{% for bar in series.bars %}
           {% if bar.value is not none %}
-          <g><title>{{ bar.day }}: {{ series.label }}, {{ "%.3f"|format(bar.value) }} kWh, {{ bar.coverage }}</title>
-            {% if bar.value > 0 %}<rect x="{{ bar.x - series.width / 2 }}" y="{{ 270 - bar.height }}" width="{{ series.width }}" height="{{ bar.height }}" fill="{{ series.color }}" fill-opacity="0.2" stroke="{{ series.color }}" stroke-width="2" {% if bar.coverage != 'complete' %}stroke-dasharray="4 3"{% endif %}/>
+          <g><title>{{ bar.day }}: {{ series.label }}, {{ "%.3f"|format(bar.value) }} kWh, {{ bar.coverage }}{% if not bar.verified %}, unverified{% endif %}</title>
+            {% if bar.value > 0 %}<rect x="{{ bar.x - series.width / 2 }}" y="{{ 270 - bar.height }}" width="{{ series.width }}" height="{{ bar.height }}" fill="{{ series.color }}" fill-opacity="0.2" stroke="{{ series.color }}" stroke-width="2" {% if not bar.verified %}stroke-dasharray="2 3"{% elif bar.coverage != 'complete' %}stroke-dasharray="4 3"{% endif %}/>
             {% else %}<circle cx="{{ bar.x }}" cy="270" r="{{ series.width / 16 }}" fill="{{ series.color }}"/>{% endif %}
           </g>
           {% endif %}
