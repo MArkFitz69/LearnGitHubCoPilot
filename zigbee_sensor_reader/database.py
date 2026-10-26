@@ -557,7 +557,8 @@ def insert_reading(
         if min_interval_seconds > 0 and packet_id is None:
             last = conn.execute(
                 """
-                SELECT timestamp, state, zone FROM readings WHERE ieee_address=?
+                SELECT timestamp, state, zone, heating_on, boost_on, heating_mode
+                FROM readings WHERE ieee_address=?
                 ORDER BY timestamp DESC, id DESC LIMIT 1
                 """,
                 (ieee_address,),
@@ -568,6 +569,9 @@ def insert_reading(
                     0 <= age < min_interval_seconds
                     and last["state"] == state
                     and last["zone"] == zone
+                    and last["heating_on"] == (int(heating_on) if heating_on is not None else None)
+                    and last["boost_on"] == (int(boost_on) if boost_on is not None else None)
+                    and last["heating_mode"] == heating_mode
                 ):
                     conn.execute(
                         "UPDATE sensors SET last_seen=? WHERE ieee_address=?",

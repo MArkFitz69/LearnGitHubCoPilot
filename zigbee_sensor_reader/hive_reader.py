@@ -14,7 +14,13 @@ import logging
 import os
 from datetime import datetime
 
-from .config import HIVE_NAMES, HIVE_NAMES_BY_ID, HIVE_ZONES_BY_ID, ZONES
+from .config import (
+    HIVE_NAMES,
+    HIVE_NAMES_BY_ID,
+    HIVE_ZONES_BY_ID,
+    SENSOR_STORE_INTERVAL_SECONDS,
+    ZONES,
+)
 from .database import get_connection, upsert_sensor, insert_reading
 
 logger = logging.getLogger(__name__)
@@ -220,6 +226,7 @@ def store_hive_readings(data: dict) -> None:
             boost_on=reading.get("boost") not in ("OFF", None, False),
             target_temp_c=reading.get("target_temp_c"),
             heating_mode=reading.get("mode"),
+            min_interval_seconds=SENSOR_STORE_INTERVAL_SECONDS,
         )
 
     for hw in data.get("hotwater", []):
@@ -245,6 +252,7 @@ def store_hive_readings(data: dict) -> None:
             heating_on=hw.get("hw_on"),    # True when actively heating water
             boost_on=hw.get("boost"),
             heating_mode=hw.get("mode"),   # SCHEDULE / ON / OFF / BOOST
+            min_interval_seconds=SENSOR_STORE_INTERVAL_SECONDS,
         )
 
     conn.close()

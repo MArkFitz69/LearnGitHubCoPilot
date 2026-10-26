@@ -40,6 +40,7 @@ from .config import (
     ESP32_MQTT_STALE_MINUTES,
     ESP32_SENSOR_NAMES,
     POLLING_INTERVAL,
+    SENSOR_STORE_INTERVAL_SECONDS,
     SHELLY_SENSORS,
 )
 
@@ -419,8 +420,9 @@ def _calculate_hive_runtime_seconds(conn: sqlite3.Connection, day: str) -> dict:
             if index + 1 < len(samples):
                 next_ts = _parse_iso_timestamp(samples[index + 1]["timestamp"])
             else:
+                store_gap = max(POLLING_INTERVAL, SENSOR_STORE_INTERVAL_SECONDS)
                 freshness_limit = current_ts + timedelta(
-                    seconds=POLLING_INTERVAL + max(30, POLLING_INTERVAL // 2)
+                    seconds=store_gap + max(30, store_gap // 2)
                 )
                 next_ts = min(now, freshness_limit)
 

@@ -889,7 +889,7 @@ class ReadOnlySurfaceTests(unittest.TestCase):
         )
         conn.commit()
         runtime = _calculate_hive_runtime_seconds(conn, stale.date().isoformat())
-        self.assertLessEqual(runtime[identity], 90)
+        self.assertLessEqual(runtime[identity], 1350)
         conn.close()
 
     def test_hive_cli_handles_heating_and_hotwater_shape(self):
