@@ -12,6 +12,7 @@ from .config import (
     SENSOR_NAMES,
     SHELLY_AUTHORITATIVE_SOURCES,
     SHELLY_SENSORS,
+    SENSOR_STORE_INTERVAL_SECONDS,
     ZONES,
 )
 from .database import (
@@ -108,8 +109,15 @@ def handle_reading(reading, conn=None) -> bool:
             authoritative_source=(
                 SHELLY_AUTHORITATIVE_SOURCES.get(mac) if mac else None
             ),
+            min_interval_seconds=(
+                SENSOR_STORE_INTERVAL_SECONDS
+                if source in ("z2m", "esp32")
+                else 0
+            ),
         )
         if not stored:
+            if getattr(reading, "packet_id", None) is None:
+                return False
             logger.info(
                 "Skipped duplicate, stale, or non-authoritative packet "
                 "identity=%s packet_id=%s source=%s",

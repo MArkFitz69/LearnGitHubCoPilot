@@ -541,13 +541,40 @@ def insert_reading(
     packet_id: int | None = None,
     source: str = "unknown",
     authoritative_source: str | None = None,
+    min_interval_seconds: int = 0,
 ) -> bool:
-    """Atomically store a reading and reject duplicate/stale BTHome packets."""
+    """Atomically store a reading and reject duplicate/stale BTHome packets.
+
+    With min_interval_seconds > 0 and no packet_id, a reading is skipped when
+    the sensor's last stored row is younger than the interval and its on/off
+    state is unchanged. The first reading and state changes are always stored.
+    """
     now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     packet_decision = None
     packet_delta = None
     try:
         conn.execute("BEGIN IMMEDIATE")
+        if min_interval_seconds > 0 and packet_id is None:
+            last = conn.execute(
+                """
+                SELECT timestamp, state, zone FROM readings WHERE ieee_address=?
+                ORDER BY timestamp DESC, id DESC LIMIT 1
+                """,
+                (ieee_address,),
+            ).fetchone()
+            if last:
+                age = (datetime.now() - _parse_timestamp(last["timestamp"])).total_seconds()
+                if (
+                    0 <= age < min_interval_seconds
+                    and last["state"] == state
+                    and last["zone"] == zone
+                ):
+                    conn.execute(
+                        "UPDATE sensors SET last_seen=? WHERE ieee_address=?",
+                        (now, ieee_address),
+                    )
+                    conn.commit()
+                    return False
         if packet_id is not None:
             if authoritative_source and source != authoritative_source:
                 preferred = conn.execute(

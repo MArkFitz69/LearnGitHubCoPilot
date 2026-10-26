@@ -226,6 +226,16 @@ class PacketAndMQTTTests(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
 
+    def test_min_interval_throttles_but_keeps_state_changes(self):
+        kw = dict(min_interval_seconds=900)
+        self.assertTrue(insert_reading(self.conn, OUTDOOR, None, None, state="on", power_w=80, **kw))
+        self.assertFalse(insert_reading(self.conn, OUTDOOR, None, None, state="on", power_w=81, **kw))
+        self.assertTrue(insert_reading(self.conn, OUTDOOR, None, None, state="off", power_w=0, **kw))
+        self.conn.execute("UPDATE readings SET timestamp='2000-01-01T00:00:00'")
+        self.conn.commit()
+        self.assertTrue(insert_reading(self.conn, OUTDOOR, None, None, state="off", power_w=0, **kw))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0], 3)
+
     def test_packet_sequence_wrap_and_stale_rejection(self):
         self.assertTrue(insert_reading(self.conn, OUTDOOR, 10, 50, packet_id=255, source="esp32"))
         self.assertTrue(insert_reading(self.conn, OUTDOOR, 11, 50, packet_id=0, source="esp32"))

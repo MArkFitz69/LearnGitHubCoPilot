@@ -17,6 +17,10 @@ DATABASE_PATH = os.environ.get(
 
 # How often to poll sensors for new data (in seconds)
 POLLING_INTERVAL = int(os.environ.get("ZIGBEE_POLL_INTERVAL", "60"))
+# Minimum seconds between stored rows per Zigbee/ESP32 sensor (0 disables).
+SENSOR_STORE_INTERVAL_SECONDS = int(
+    os.environ.get("SENSOR_STORE_INTERVAL_SECONDS", "900")
+)
 WEB_HOST = os.environ.get("WEB_HOST", "0.0.0.0")
 
 # CSV / Excel export directory
