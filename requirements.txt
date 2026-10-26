@@ -2,7 +2,7 @@
 openpyxl>=3.1.0
 
 # Hive thermostat integration
-pyhive-integration>=1.0.0
+pyhive-integration>=1.0.10
 
 # Shelly Blu H&T BLE sensor support
 bleak>=0.21.0

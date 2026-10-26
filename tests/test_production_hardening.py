@@ -901,6 +901,34 @@ class ReadOnlySurfaceTests(unittest.TestCase):
         self.assertIn("Hall: 20.0°C", output.getvalue())
         self.assertIn("Water: ON", output.getvalue())
 
+    def test_hive_fetch_retries_transient_failure(self):
+        calls = []
+
+        async def flaky():
+            calls.append(1)
+            if len(calls) < 3:
+                raise RuntimeError("reauthentication required")
+            return {"heating": [{"name": "Hall"}], "hotwater": []}
+
+        with (
+            mock.patch.object(hive_reader, "_fetch_hive_data_once", flaky),
+            mock.patch.object(hive_reader, "HIVE_RETRY_DELAY_SECONDS", 0),
+        ):
+            data = asyncio.run(hive_reader.fetch_hive_data())
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(data["heating"][0]["name"], "Hall")
+
+    def test_hive_fetch_gives_up_after_all_attempts(self):
+        async def always_fails():
+            raise RuntimeError("timeout")
+
+        with (
+            mock.patch.object(hive_reader, "_fetch_hive_data_once", always_fails),
+            mock.patch.object(hive_reader, "HIVE_RETRY_DELAY_SECONDS", 0),
+        ):
+            data = asyncio.run(hive_reader.fetch_hive_data())
+        self.assertEqual(data, {"heating": [], "hotwater": []})
+
     def test_hive_identity_resolved_by_stable_uuid_not_drifted_hivename(self):
         # Simulate the real-world drift: the Hive API's "hiveName" strings
         # ("Thermostat 4"/"Thermostat 6") point at the wrong physical unit,

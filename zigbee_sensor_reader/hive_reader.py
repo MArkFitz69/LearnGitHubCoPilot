@@ -23,14 +23,37 @@ logger = logging.getLogger(__name__)
 HIVE_USERNAME = os.environ.get("HIVE_USERNAME", "")
 HIVE_PASSWORD = os.environ.get("HIVE_PASSWORD", "")
 
+# Number of attempts per poll; the Hive cloud API times out intermittently and
+# the library reports a timeout on a fresh session as "reauthentication required".
+HIVE_FETCH_ATTEMPTS = 3
+HIVE_RETRY_DELAY_SECONDS = 5
+
 
 async def fetch_hive_data() -> dict:
+    """Fetch Hive data, retrying transient Hive cloud API failures."""
+    for attempt in range(1, HIVE_FETCH_ATTEMPTS + 1):
+        try:
+            return await _fetch_hive_data_once()
+        except Exception as e:
+            logger.warning(
+                "Hive fetch attempt %d/%d failed: %r",
+                attempt, HIVE_FETCH_ATTEMPTS, e,
+            )
+            if attempt < HIVE_FETCH_ATTEMPTS:
+                await asyncio.sleep(HIVE_RETRY_DELAY_SECONDS)
+    logger.error("Hive API error: all %d attempts failed", HIVE_FETCH_ATTEMPTS)
+    return {"heating": [], "hotwater": []}
+
+
+async def _fetch_hive_data_once() -> dict:
     """
     Connect to the Hive API and fetch thermostat + hot water data.
 
     Returns a dict with keys:
         "heating": list of heating dicts
         "hotwater": list of hot water dicts
+
+    Raises on API/library errors so the caller can retry.
     """
     from apyhiveapi import Hive
 
@@ -164,9 +187,8 @@ async def fetch_hive_data() -> dict:
 
         return {"heating": heating_results, "hotwater": hotwater_results}
 
-    except Exception as e:
-        logger.error("Hive API error: %s", e)
-        return {"heating": [], "hotwater": []}
+    except Exception:
+        raise
 
 
 def store_hive_readings(data: dict) -> None:
