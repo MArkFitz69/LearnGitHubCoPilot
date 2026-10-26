@@ -218,6 +218,32 @@ class EnergyStoreTests(unittest.TestCase):
         self.assertFalse(graph["series"][2]["available"])
         self.assertTrue(all(bar["value"] is None for bar in graph["series"][2]["bars"]))
 
+    def test_original_dashboard_embeds_energy_and_keeps_sensor_sections(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "dashboard.db"
+            with sqlite3.connect(path) as destination:
+                self.conn.backup(destination)
+            destination.close()
+
+            def connect():
+                conn = sqlite3.connect(path)
+                conn.row_factory = sqlite3.Row
+                return conn
+
+            with mock.patch.object(web_server, "get_db", side_effect=connect):
+                client = web_server.app.test_client()
+                for route in ("/", "/dashboard?date=2026-07-07"):
+                    response = client.get(route)
+                    self.assertEqual(response.status_code, 200)
+                    html = response.get_data(as_text=True)
+                    self.assertEqual(html.lower().count("<!doctype html>"), 1)
+                    self.assertIn('id="home-energy"', html)
+                    self.assertIn("Daily energy supply and consumption overlays", html)
+                    self.assertIn("Sonoff Sensors", html)
+                    self.assertIn('action="/dashboard#home-energy"', html)
+                    self.assertNotIn("<iframe", html)
+                self.assertEqual(client.get("/dashboard?date=invalid").status_code, 400)
+
     def test_old_database_without_energy_schema_has_empty_state(self):
         for name in ("energy_samples", "energy_daily", "energy_health"):
             self.conn.execute(f"DROP TABLE {name}")

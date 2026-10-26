@@ -234,7 +234,8 @@ are deferred until the map is verified; existing history is untouched.
 
 ## Energy dashboard and logging
 
-Open **`/energy`** (linked from the sensor dashboard), or use
+Energy now appears directly on the original **`/dashboard`** alongside sensors.
+The same component is also available at **`/energy`**, or use
 **`/api/energy?date=YYYY-MM-DD`** for JSON. The date selector and seven-day
 history use **Europe/London calendar days**, including 23/25-hour clock-change
 days. Latest cards always show the newest stored sample, not the selected
@@ -377,6 +378,35 @@ polls replace daily history instead of adding it again. No older-day backfill
 or sensor-history thinning is performed.
 
 ## Commands
+
+### Removing confirmed retired Hive TRVs
+
+Only these four UUIDs are retired locally; names are not used for deletion:
+Blanca `19202bc4-5e00-4775-a9ce-626c74a5b61f`,
+Game Room `4a605a4b-6b94-48bb-96bb-b80b62a18de5`,
+old Guest bedroom `7f227d9b-00b0-4292-95ee-ab88844357c9`,
+old Stella `892104ff-9bad-4466-a503-6f851b0e7909`.
+The active Stella `f0d0f1e4-4d5f-46de-b64a-5cd67065e24f` and Guest Bedroom
+`5e83431b-0a7e-4763-a7a7-10c55678c950` are preserved.
+Hive collection ignores the retired IDs, without changing Hive service devices.
+
+After deploying this code, preview the exact database records first:
+
+```bash
+cd /home/admin/LearnGitHubCoPilot
+.venv/bin/python -m zigbee_sensor_reader.retire_hive
+sudo systemctl stop zigbee-sensor-reader sensor-data-api
+.venv/bin/python -m zigbee_sensor_reader.retire_hive --apply
+sudo systemctl start zigbee-sensor-reader sensor-data-api
+```
+
+Use the service's `ZIGBEE_DB_PATH` in this shell if overridden. The explicit
+`--apply` creates a SQLite backup alongside the database, then atomically
+deletes only the allowlisted sensor records, readings and associated packet/
+source state. It refuses the whole deletion if any targeted device has activity
+within 24 hours. If it fails, inspect the error before retrying; restart the
+services to resume logging. Once removed, the old records disappear from both
+the dashboard and System Status. No automatic historical deletion runs on startup.
 
 ```bash
 python -m zigbee_sensor_reader

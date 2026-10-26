@@ -18,6 +18,7 @@ from .config import (
     HIVE_NAMES,
     HIVE_NAMES_BY_ID,
     HIVE_ZONES_BY_ID,
+    RETIRED_HIVE_IDS,
     SENSOR_STORE_INTERVAL_SECONDS,
     ZONES,
 )
@@ -92,6 +93,9 @@ async def _fetch_hive_data_once() -> dict:
         for dev in session.get("climate", []):
             hive_name = dev.get("hiveName", "Unknown")
             device_id = dev.get("hiveID", dev.get("device_id", "unknown"))
+            if device_id in RETIRED_HIVE_IDS:
+                logger.info("Skipping retired Hive device %s", device_id)
+                continue
             # The device UUID is the stable identity; the "hiveName" string
             # (e.g. "Thermostat 4") can drift from its physical unit, so
             # prefer the UUID-keyed maps whenever the UUID is recognized.
@@ -202,6 +206,9 @@ def store_hive_readings(data: dict) -> None:
     conn = get_connection()
 
     for reading in data.get("heating", []):
+        if reading["device_id"] in RETIRED_HIVE_IDS:
+            logger.info("Not storing retired Hive device %s", reading["device_id"])
+            continue
         # Use "hive:" prefix to distinguish from Zigbee sensors
         ieee_address = f"hive:{reading['device_id']}"
         friendly_name = f"Hive {reading['name']}"

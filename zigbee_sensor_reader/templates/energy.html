@@ -1,41 +1,42 @@
-<!doctype html>
+{% if not embedded %}<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta http-equiv="refresh" content="60">
   <title>Home Energy</title>
-  <style>
-    :root{color-scheme:dark;--muted:#a3b4c6;--line:#293b50;--green:#5de0ad}
-    *{box-sizing:border-box}body{margin:0;background:#0c1622;color:#eaf1f8;font:15px system-ui,sans-serif}
-    main{max-width:1240px;margin:auto;padding:26px}a{color:#8ac9ff}
-    header,.toolbar{display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap}
-    h1{font-size:32px;margin:8px 0}h2{margin-top:30px;font-size:21px}
-    h3{font-size:14px;font-weight:500;color:var(--muted);margin:0 0 12px}
-    .eyebrow{color:var(--green);font-size:12px;letter-spacing:2px}.muted,small{color:var(--muted)}
-    .banner{padding:16px 20px;border:1px solid var(--line);border-radius:12px;background:#122638;margin:22px 0}
-    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}
-    .card{border:1px solid var(--line);background:#142131;border-radius:12px;padding:18px;min-width:0}
-    .value{font-size:30px;font-weight:650;margin:5px 0}.unit{font-size:15px;font-weight:400;color:var(--muted)}
-    .badge{display:inline-block;font-size:11px;border-radius:5px;padding:3px 6px;background:#26384b;margin:5px 4px 5px 0}
-    .warning{color:#ffd68b;background:#433523}.ok{color:var(--green)}
-    .card p{font-size:12px;line-height:1.5;margin:6px 0;overflow-wrap:anywhere}
-    input,button{padding:9px;border-radius:6px;border:1px solid #405670;background:#15283b;color:#fff}
-    button{cursor:pointer}table{width:100%;border-collapse:collapse;white-space:nowrap}
-    td,th{text-align:right;padding:13px 10px;border-bottom:1px solid var(--line)}
-    th:first-child,td:first-child{text-align:left}.scroll{overflow-x:auto}
-    svg{width:100%;height:130px;display:block}.charts{grid-template-columns:repeat(auto-fit,minmax(310px,1fr))}
-    .axis{display:flex;justify-content:space-between;font-size:11px;color:var(--muted)}
-    .health{margin-top:24px;line-height:1.8;overflow-wrap:anywhere}
-    .daily-energy-graph{height:auto;min-width:650px}
-    .legend{display:flex;flex-wrap:wrap;gap:12px;font-size:13px;margin-bottom:16px}
-    .swatch{display:inline-block;width:12px;height:12px;margin-right:6px;background:var(--series-color)}
-    @media(max-width:400px){.charts{grid-template-columns:minmax(0,1fr)}}
-  </style>
 </head>
-<body><main>
+<body style="margin:0;background:#0c1622">
+{% endif %}
+<style>
+    .energy-panel{color-scheme:dark;--muted:#a3b4c6;--line:#293b50;--green:#5de0ad;background:#0c1622;color:#eaf1f8;font:15px system-ui,sans-serif;max-width:1240px;margin:auto;padding:26px}
+    .energy-panel *{box-sizing:border-box}.energy-panel a{color:#8ac9ff}
+    .energy-panel :is(header,.toolbar){display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap}
+    .energy-panel h1{font-size:32px;margin:8px 0}.energy-panel h2{margin-top:30px;font-size:21px;border:0}
+    .energy-panel h3{font-size:14px;font-weight:500;color:var(--muted);margin:0 0 12px}
+    .energy-panel .eyebrow{color:var(--green);font-size:12px;letter-spacing:2px}.energy-panel :is(.muted,small){color:var(--muted)}
+    .energy-panel .banner{padding:16px 20px;border:1px solid var(--line);border-radius:12px;background:#122638;margin:22px 0}
+    .energy-panel .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}
+    .energy-panel .card{border:1px solid var(--line);background:#142131;border-radius:12px;padding:18px;min-width:0}
+    .energy-panel .value{font-size:30px;font-weight:650;margin:5px 0}.energy-panel .unit{font-size:15px;font-weight:400;color:var(--muted)}
+    .energy-panel .badge{display:inline-block;font-size:11px;border-radius:5px;padding:3px 6px;background:#26384b;margin:5px 4px 5px 0}
+    .energy-panel .warning{color:#ffd68b;background:#433523}.energy-panel .ok{color:var(--green)}
+    .energy-panel .card p{font-size:12px;line-height:1.5;margin:6px 0;overflow-wrap:anywhere}
+    .energy-panel :is(input,button){padding:9px;border-radius:6px;border:1px solid #405670;background:#15283b;color:#fff}
+    .energy-panel button{cursor:pointer}.energy-panel table{width:100%;border-collapse:collapse;white-space:nowrap;background:transparent}
+    .energy-panel :is(td,th){text-align:right;padding:13px 10px;border:0;border-bottom:1px solid var(--line);background:transparent}
+    .energy-panel :is(th,td):first-child{text-align:left}.energy-panel .scroll{overflow-x:auto}
+    .energy-panel svg{width:100%;height:130px;display:block}.energy-panel .charts{grid-template-columns:repeat(auto-fit,minmax(310px,1fr))}
+    .energy-panel .axis{display:flex;justify-content:space-between;font-size:11px;color:var(--muted)}
+    .energy-panel .health{margin-top:24px;line-height:1.8;overflow-wrap:anywhere}
+    .energy-panel .daily-energy-graph{height:auto;min-width:650px}
+    .energy-panel .legend{display:flex;flex-wrap:wrap;gap:12px;font-size:13px;margin-bottom:16px}
+    .energy-panel .swatch{display:inline-block;width:12px;height:12px;margin-right:6px;background:var(--series-color)}
+    @media(max-width:400px){.energy-panel .charts{grid-template-columns:minmax(0,1fr)}}
+</style>
+<div class="energy-panel">
   <header>
-    <div><div class="eyebrow">HOME / ENERGY</div><h1>Your energy, in view</h1>
+    <div><div class="eyebrow">HOME / ENERGY</div><h2>Your energy, in view</h2>
       <span class="muted">Duracell + myenergi &middot; UK calendar days &middot; 15-minute snapshots</span></div>
     <nav><a href="/dashboard">Sensors</a> &nbsp; <a href="/system">System</a> &nbsp;
       <a href="/api/energy?date={{ day }}">Energy JSON</a></nav>
@@ -66,7 +67,7 @@
   </div>
   <div class="toolbar">
     <h2>Daily energy &middot; {{ day }}</h2>
-    <form action="/energy"><label for="date">UK date </label><input id="date" type="date" name="date" value="{{ day }}"><button type="submit">View</button></form>
+    <form action="{{ '/dashboard#home-energy' if embedded else '/energy' }}"><label for="date">UK date </label><input id="date" type="date" name="date" value="{{ day }}"><button type="submit">View</button></form>
   </div>
   <p class="muted">Device-reported energy only. Today is day-to-date; partial days are labelled. No estimates from power samples.</p>
   <div class="grid">
@@ -129,4 +130,4 @@
     {% else %}<p class="muted">No energy collectors have reported. Duracell is opt-in via DURACELL_HOST; myenergi uses the existing service credentials.</p>{% endfor %}
     <p class="muted">Battery state of charge is separate from sensor battery health. Grid import is not necessarily battery charging. Zappi delivered energy is charger output, not an EV battery SOC increase.</p>
   </section>
-</main></body></html>
+</div>{% if not embedded %}</body></html>{% endif %}

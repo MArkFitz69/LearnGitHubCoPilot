@@ -44,6 +44,14 @@ SENSOR_NAMES: dict[str, str] = {
     "f4:b3:b1:ff:fe:5e:09:d8": "Games Room",
 }
 
+# Confirmed inactive identities; never match retirements by friendly name.
+RETIRED_HIVE_IDS = frozenset({
+    "19202bc4-5e00-4775-a9ce-626c74a5b61f",  # Blanca TRV
+    "4a605a4b-6b94-48bb-96bb-b80b62a18de5",  # Game Room TRV
+    "7f227d9b-00b0-4292-95ee-ab88844357c9",  # Old Guest bedroom
+    "892104ff-9bad-4466-a503-6f851b0e7909",  # Old Stella TRV
+})
+
 # Friendly names for Hive thermostats (keyed by Hive device name)
 # NOTE: The Hive API's "hiveName" (e.g. "Thermostat 4") is NOT guaranteed to
 # stay attached to the same physical unit — Hive can reassign it. The device
